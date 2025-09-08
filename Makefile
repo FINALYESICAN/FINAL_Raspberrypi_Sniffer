@@ -1,21 +1,32 @@
 # Makefile for pcap_inspect
 CXX      := g++
-CXXFLAGS := -std=c++17 -O2 -Wall
-LDFLAGS  := -lpcap
+CXXFLAGS := -std=c++17 -O2 -Wall -Iinclude
+LIBS  := -lpcap
 
-SRC      := pcap_inspect.cpp
+SRC_DIR  := src
+OBJ_DIR  := build
 TARGET   := pcap_inspect
+
+SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+OBJS := $(patsubst $(SRC_DIR)/*.cpp,$(OBJ_DIR)/%.o,$(SRCS))
 
 all: $(TARGET)
 
-$(TARGET): $(SRC) session_table.h packet_record.h
-	$(CXX) $(CXXFLAGS) -o $@ $(SRC) $(LDFLAGS)
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
-run: $(TARGET)
+$(OBJ_DIR):
+	@echo "Compiling $<..."
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJ_DIR):
+	@mkdir -p $(OBJ_DIR)
+
+run: all
 	sudo ./$(TARGET)
 
 clean:
-	rm -f $(TARGET)
+	rm -rf $(OBJ_DIR) $(TARGET)
 
 .PHONY: all run clean
 
