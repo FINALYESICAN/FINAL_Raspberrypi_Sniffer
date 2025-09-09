@@ -1,15 +1,16 @@
-// session_table.hpp
+// session_table.h
 #pragma once
+
+#include "packet_record.h"
+
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <unordered_map>
 #include <array>
-#include <algorithm>
 #include <vector>
-#include <cstdio>
-#include <arpa/inet.h>
-#include "packet_record.h"
+
+static inline double ns_to_sec(uint64_t ns){return ns/1e9;}
 
 struct FiveTuple {
     uint32_t sip{};
@@ -24,6 +25,7 @@ struct FiveTuple {
         return sip==o.sip && dip==o.dip && sport==o.sport && dport==o.dport && proto==o.proto;
     }
 };
+
 struct FiveTupleHash {
     size_t operator()(const FiveTuple& k) const noexcept {
         // 간단한 합성 해시
@@ -37,12 +39,31 @@ struct FiveTupleHash {
 };
 
 struct DirStats {
+    //패킷 개수, 바이트수, 마지막 받은시간, 마지막 sequence num, 마지막 ack num
     uint64_t pkts{0}, bytes{0};
     uint64_t last_ts_ns{0};
     uint32_t last_seq{0}, last_ack{0};
-    // 매우 단순한 RTT 측정을 위해 최근 전송 데이터의 seq_end 저장
+    // RTT 측정을 위해 최근 전송 데이터의 seq_end 저장 = last_seq+데이터 바이트수
     uint32_t last_data_seq_end{0};
     bool     have_last_data{false};
+    // 마지막 페이로드가 있는 데이터 전송 시각 RTT에서 사용
+    uint64_t last_data_ts_ns{0};
+
+    // --- Throughput용 ---
+    // 1초 슬라이딩 윈도우(간단): 윈도우 내 바이트/시간으로 즉시 bps 계산
+    uint64_t win_start_ns{0};
+    uint64_t win_bytes{0};
+    double   inst_bps{0.0};    // 직전 윈도우에서 계산된 bps
+    double   ewma_bps{0.0};    // 지수평활 - 최근 측정에 가중치 준다.
+
+    // --- 재전송/순서 관련 ---
+    uint32_t highest_seq_end{0}; // 지금까지 본 데이터 구간의 최댓값(우측 끝)
+    uint64_t retrans_pkts{0};    // 재전송으로 판단된 패킷 수
+    uint64_t ooo_pkts{0};        // out-of-order 판단 수(참고 통계)
+
+    // --- 중복 ACK 감지(상대 방향 혼잡/재전송 트리거 힌트) ---
+    uint32_t last_ack_val{0};
+    uint32_t dup_ack_run{0};
 };
 
 enum class TcpState : uint8_t {
@@ -50,9 +71,10 @@ enum class TcpState : uint8_t {
 };
 
 struct Session {
-    FiveTuple key{};
-    uint64_t first_ts_ns{0}, last_ts_ns{0};
-    DirStats dir[2]; // 0=정규화 기준 (A->B), 1=반대(B->A)
+    FiveTuple key{}; //세션 키
+    uint64_t first_ts_ns{0}, last_ts_ns{0}; //
+    //각 방향마다의 패킷 정보, 0=정규화 기준 (A->B), 1=반대(B->A)
+    DirStats dir[2];
     bool is_tcp{false};
 
     // TCP 상태/RTT
@@ -64,154 +86,40 @@ struct Session {
 
     // ACK 기반 최근 RTT 샘플
     double   rtt_ack_ms{-1.0};
+
+    // --- 상대 시퀀스 번호 정규화용 Initial Seq Num ---
+    bool     isn_set[2]{false,false};
+    uint32_t isn[2]{0,0}; // dir별 초기 시퀀스(상대측이 보낸 SYN의 seq)
+
+    // TCP 타임스탬프(있으면 보다 정확한 RTT로 확장 가능)
+    bool     tsopt_seen{false};
 };
 
 class SessionTable {
 public:
     // 세션 저장소
     std::unordered_map<FiveTuple, Session, FiveTupleHash> map;
-
     // 패킷으로부터 키 생성 + 방향 판정
     // ret.dir = 0 (A->B) or 1 (B->A) in canonical orientation.
     struct KeyDir { FiveTuple key; int dir; };
-    static KeyDir canonical_from_packet(const PacketRecord& pr) {
-        KeyDir kd{};
-        kd.key.proto = pr.l4_proto;
-        kd.key.sip   = pr.ipv4_src;
-        kd.key.dip   = pr.ipv4_dst;
-        kd.key.sport = pr.sport;
-        kd.key.dport = pr.dport;
-        // sort by (ip,port) pair
-        bool keep = less_pair(kd.key.sip, kd.key.sport, kd.key.dip, kd.key.dport);
-        if (!keep) {
-            std::swap(kd.key.sip, kd.key.dip);
-            std::swap(kd.key.sport, kd.key.dport);
-            kd.dir = 1; // original was B->A
-        } else {
-            kd.dir = 0; // original was A->B
-        }
-        return kd;
-    }
+    
+    //packet으로부터 5tuple뽑아서 ip, port에 따라 direction 결정
+    static KeyDir canonical_from_packet(const PacketRecord& pr);
 
-    // 세션 업데이트
-    void update_from_packet(const PacketRecord& pr) {
-        if (!(pr.ip_version==4) || (pr.l4_proto!=6 && pr.l4_proto!=17)) return; // TCP/UDP만
-
-        auto kd = canonical_from_packet(pr);
-        auto& sess = map[kd.key];
-        if (sess.first_ts_ns==0) {
-            sess.key = kd.key;
-            sess.first_ts_ns = pr.ts_ns;
-            sess.is_tcp = (pr.l4_proto==6);
-        }
-        sess.last_ts_ns = pr.ts_ns;
-
-        DirStats& d = sess.dir[kd.dir];
-        d.pkts  += 1;
-        d.bytes += pr.wirelen;
-        d.last_ts_ns = pr.ts_ns;
-
-        // TCP 상태/RTT
-        if (sess.is_tcp) update_tcp(sess, kd.dir, pr);
-    }
-
+    // 세션 업데이트 -> packetRecord를 받음, main에서 불러서 사용
+    void update_from_packet(const PacketRecord& pr);
+    
     // 상위 N 세션(바이트 합계 기준) 덤프
-    void dump_top(size_t N = 10) const {
-        struct Row{
-            const Session* s; uint64_t bytes;
-        };
-        std::vector<Row> rows;
-        rows.reserve(map.size());
-        for (auto& kv : map) {
-            uint64_t b = kv.second.dir[0].bytes + kv.second.dir[1].bytes;
-            rows.push_back({ &kv.second, b });
-        }
-        std::sort(rows.begin(), rows.end(), [](auto& a, auto& b){ return a.bytes>b.bytes; });
-        if (rows.size()>N) rows.resize(N);
-
-        std::puts("\n[session] top sessions:");
-        for (size_t i=0;i<rows.size();++i) {
-            const Session& s = *rows[i].s;
-            char a[64]={0}, b[64]={0};
-            in_addr ia{.s_addr=s.key.sip}, ib{.s_addr=s.key.dip};
-            inet_ntop(AF_INET, &ia, a, sizeof(a));
-            inet_ntop(AF_INET, &ib, b, sizeof(b));
-            std::printf("%2zu) %s:%u <-> %s:%u  proto=%u  bytes=%llu  pkts=%llu "
-                        "state=%s  rtt_syn=%.2fms  rtt_ack=%.2fms\n",
-                i+1, a, ntohs(s.key.sport), b, ntohs(s.key.dport), s.key.proto,
-                (unsigned long long)rows[i].bytes,
-                (unsigned long long)(s.dir[0].pkts + s.dir[1].pkts),
-                tcp_state_name(s.state),
-                s.rtt_syn_ms, s.rtt_ack_ms);
-        }
-    }
+    void dump_top(size_t N = 10) const;
 
 private:
-    static bool less_pair(uint32_t ip1, uint16_t p1, uint32_t ip2, uint16_t p2) {
-        if (ip1!=ip2) return ip1<ip2;
-        return p1<=p2;
-    }
+    static bool less_pair(uint32_t ip1, uint16_t p1, uint32_t ip2, uint16_t p2);
 
-    static const char* tcp_state_name(TcpState st){
-        switch(st){
-            case TcpState::NONE: return "NONE";
-            case TcpState::SYN_SENT: return "SYN_SENT";
-            case TcpState::SYN_RECV: return "SYN_RECV";
-            case TcpState::ESTABLISHED: return "ESTABLISHED";
-            case TcpState::FIN: return "FIN";
-            case TcpState::RST: return "RST";
-            case TcpState::CLOSED: return "CLOSED";
-        }
-        return "?";
-    }
+    static const char* tcp_state_name(TcpState st);
 
-    static void update_tcp(Session& s, int dir, const PacketRecord& pr){
-        // 플래그
-        const uint8_t f = pr.tcp_flags;
-        const bool SYN = f & 0x02;
-        const bool ACK = f & 0x10;
-        const bool FIN = f & 0x01;
-        const bool RST = f & 0x04;
+    static void update_throughput_window(DirStats& d, uint64_t now_ns, uint64_t add_bytes);
 
-        // 상태전이(아주 단순화)
-        if (SYN && !ACK) {                 // A->B SYN
-            if (dir==0) {
-                s.state = TcpState::SYN_SENT;
-                s.syn_ts_valid = true; s.syn_ts_ns = pr.ts_ns;
-            } else {
-                s.state = TcpState::SYN_RECV; // 비정상/재전송 케이스일 수도
-            }
-        } else if (SYN && ACK) {           // B->A SYN-ACK
-            s.state = TcpState::SYN_RECV;
-            if (dir==1 && s.syn_ts_valid && s.rtt_syn_ms<0) {
-                s.rtt_syn_ms = (pr.ts_ns - s.syn_ts_ns) / 1e6; // ms
-            }
-        } else if (ACK && !SYN && !FIN && !RST) {
-            if (s.state==TcpState::SYN_RECV || s.state==TcpState::SYN_SENT)
-                s.state = TcpState::ESTABLISHED;
-        }
-        if (FIN) s.state = TcpState::FIN;
-        if (RST) s.state = TcpState::RST;
+    static uint32_t rel_seq(const Session& s, int dir, uint32_t seq);
 
-        // 방향별 seq/ack 저장
-        DirStats& me = s.dir[dir];
-        DirStats& peer = s.dir[dir^1];
-        me.last_seq = pr.tcp_seq;
-        me.last_ack = pr.tcp_ack;
-
-        // 페이로드가 있으면(헤더 이후 바이트) 데이터 전송으로 간주 → RTT 샘플 대상
-        if (pr.payload_len>0) {
-            // TCP seq는 첫 바이트 기준, seq_end = seq + payload_len
-            me.last_data_seq_end = pr.tcp_seq + pr.payload_len;
-            me.have_last_data = true;
-        }
-        // 반대편 ACK가 내 last_data_seq_end를 확인하면 RTT 산출
-        if (peer.have_last_data && ACK) {
-            if (pr.tcp_ack >= peer.last_data_seq_end) {
-                double ms = (pr.ts_ns - peer.last_ts_ns) / 1e6; // 아주 러프한 근사
-                if (ms >= 0.0) s.rtt_ack_ms = ms;
-                peer.have_last_data = false; // 한 번 소모
-            }
-        }
-    }
+    static void update_tcp(Session& s, int dir, const PacketRecord& pr);
 };

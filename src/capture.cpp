@@ -8,6 +8,7 @@ bool Capture::open(const char* dev, int snap, bool prom, int to_ms,
     char err[PCAP_ERRBUF_SIZE] = {0};
     p_ = pcap_create(dev, err);
     if (!p_) { std::fprintf(stderr, "pcap_create: %s\n", err); return false; }
+    //libpcap 옵션 설정
     pcap_set_snaplen(p_, snap);
     pcap_set_promisc(p_, prom ? 1 : 0);
     pcap_set_timeout(p_, to_ms);
@@ -38,11 +39,13 @@ bool Capture::apply_bpf(const char* bpf){
     return true;
 }
 
+//on_pkt함수 / should_stop 함수
 void Capture::loop(std::function<void(const pcap_pkthdr*, const u_char*)> on_pkt,
                    std::function<bool(void)> should_stop){
     while (!should_stop()) {
         pcap_pkthdr* h; const u_char* b;
         int rc = pcap_next_ex(p_, &h, &b);
+        //다음 패킷을 main의 cb를 통해 처리한다.
         if (rc == 1) on_pkt(h, b);
         else if (rc == 0) continue;         // timeout
         else if (rc == -1) { std::fprintf(stderr,"pcap err: %s\n", pcap_geterr(p_)); break; }
@@ -57,6 +60,7 @@ void Capture::print_stats() const{
                     st.ps_recv, st.ps_drop, st.ps_ifdrop);
     }
 }
+
 void Capture::close(){ if (p_) { pcap_close(p_); p_ = nullptr; } }
 
 void Capture::list_interfaces(){

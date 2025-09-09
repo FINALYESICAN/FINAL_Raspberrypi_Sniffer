@@ -1,8 +1,9 @@
 // decoder.h
 #pragma once
+#include "packet_record.h"
 #include <pcap.h>
 #include <cstdint>
-#include "packet_record.h"
+
 
 class Decoder {
 public:

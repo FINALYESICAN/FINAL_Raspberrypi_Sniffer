@@ -4,21 +4,24 @@
 #include <vector>
 
 struct PacketRecord {
+    // 패킷 고유 ID값
+    uint64_t id{};
     // ts / length
     uint64_t ts_ns{};
     uint32_t caplen{};
     uint32_t wirelen{};
+
+    // packet offset
+    uint32_t l2_off{};
+    uint32_t l3_off{};
+    uint32_t l4_off{};
+    uint32_t l4_hdr_len{};
 
     // L2
     int dlt{};
     std::array<uint8_t, 6> dst_mac{};
     std::array<uint8_t, 6> src_mac{};
     uint16_t ethertype{};
-
-    uint32_t l2_off{};
-    uint32_t l3_off{};
-    uint32_t l4_off{};
-    uint32_t l4_hdr_len{};
 
     // L3
     uint8_t  ip_version{};   // 4/6 (0=non-IP)

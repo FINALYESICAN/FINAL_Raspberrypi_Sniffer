@@ -3,14 +3,17 @@
 #include <deque>
 #include <utility>
 #include <cstdio>
-#include "packet_record.h"
 #include <arpa/inet.h>
+#include <atomic>
+#include "packet_record.h"
 
 class PacketList {
     std::deque<PacketRecord> dq_;
+    std::atomic<uint64_t> next_id_{1};
 public:
     size_t max_count = 50000;
     void push(PacketRecord&& rec){
+        rec.id = next_id_.fetch_add(1, std::memory_order_relaxed);
         dq_.emplace_back(std::move(rec));
         while (dq_.size()>max_count) dq_.pop_front();
     }
