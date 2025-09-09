@@ -4,6 +4,9 @@
 
 ## 사용된 구조체는 아래에 정리할 예정입니다.
 
+## 종속성
+sudo apt install libpcap-dev -y
+
 ## 현재 구현상태
 1. pcap_loop에 packet handler를 통해 PacketRecord에 L2~L4 + 페이로드 저장
 
