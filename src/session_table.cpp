@@ -136,18 +136,13 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
 
     // 상태전이(아주 단순화)
     if (SYN && !ACK) {                 // A->B SYN
-        if (dir==0) {
-            s.state = TcpState::SYN_SENT;
-            s.syn_ts_valid = true; 
-            s.syn_ts_ns = pr.ts_ns;
-            if(!s.isn_set[0]){ s.isn[0]= pr.tcp_seq; s.isn_set[0]=true; }
-        } else {
-            s.state = TcpState::SYN_RECV; // 비정상/재전송 케이스일 수도
-            if(!s.isn_set[1]){ s.isn[1]= pr.tcp_seq; s.isn_set[1]=true; }
-        }
+        s.state = TcpState::SYN_SENT;
+        s.syn_ts_valid = true; 
+        s.syn_ts_ns = pr.ts_ns;
+        if(!s.isn_set[0]){ s.isn[0]= pr.tcp_seq; s.isn_set[0]=true; }
     } else if (SYN && ACK) {           // B->A SYN-ACK
         s.state = TcpState::SYN_RECV;
-        if (dir==1 && s.syn_ts_valid && s.rtt_syn_ms<0) {
+        if (s.syn_ts_valid && s.rtt_syn_ms < 0) {
             s.rtt_syn_ms = (pr.ts_ns - s.syn_ts_ns) / 1e6; // ms
         }
         // ISN(B->A) (SYN-ACK의 seq도 ISN)
