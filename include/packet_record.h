@@ -11,6 +11,11 @@ struct PacketRecord {
     uint32_t caplen{};
     uint32_t wirelen{};
 
+    // Timestamp
+    bool tcp_ts_present = false;
+    uint32_t tcp_ts_val = 0;
+    uint32_t tcp_ts_ecr = 0;
+
     // packet offset
     uint32_t l2_off{};
     uint32_t l3_off{};

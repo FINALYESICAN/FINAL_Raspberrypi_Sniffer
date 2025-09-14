@@ -139,14 +139,14 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
         s.state = TcpState::SYN_SENT;
         s.syn_ts_valid = true; 
         s.syn_ts_ns = pr.ts_ns;
-        if(!s.isn_set[0]){ s.isn[0]= pr.tcp_seq; s.isn_set[0]=true; }
+        if(!s.isn_set[dir]){ s.isn[dir]= pr.tcp_seq; s.isn_set[dir]=true; }
     } else if (SYN && ACK) {           // B->A SYN-ACK
         s.state = TcpState::SYN_RECV;
         if (s.syn_ts_valid && s.rtt_syn_ms < 0) {
             s.rtt_syn_ms = (pr.ts_ns - s.syn_ts_ns) / 1e6; // ms
         }
         // ISN(B->A) (SYN-ACK의 seq도 ISN)
-        if (dir==1 && !s.isn_set[1]) { s.isn[1] = pr.tcp_seq; s.isn_set[1]=true; }
+        if (!s.isn_set[dir]) { s.isn[dir] = pr.tcp_seq; s.isn_set[dir]=true; }
     } else if (ACK && !SYN && !FIN && !RST) {
         if (s.state==TcpState::SYN_RECV || s.state==TcpState::SYN_SENT)
             s.state = TcpState::ESTABLISHED;
@@ -159,6 +159,32 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
     DirStats& peer = s.dir[dir^1];
     me.last_seq = pr.tcp_seq;
     me.last_ack = pr.tcp_ack;
+
+    if (pr.tcp_ts_present) {
+        // 내가 '이 방향'에서 보낸 TSval 기록 (항상)
+        me.ts_recent_val = pr.tcp_ts_val;
+        me.ts_recent_time_ns = pr.ts_ns;
+        me.ts_recent_valid = true;
+
+        // ▼ '상대가 나의 마지막 데이터'를 확인하는 ACK 순간에만 TS RTT 측정
+        if (ACK && peer.have_last_data) {
+            uint32_t rack = rel_seq(s, dir, pr.tcp_ack);
+            if (rack >= peer.last_data_seq_end &&
+                peer.ts_recent_valid &&
+                pr.tcp_ts_ecr != 0 &&
+                pr.tcp_ts_ecr == peer.ts_recent_val) {
+
+                const int64_t dt_ns = (int64_t)pr.ts_ns - (int64_t)peer.ts_recent_time_ns;
+                // 0 <= RTT <= 3000ms (환경에 맞게 튜닝)
+                if (dt_ns >= 0 && dt_ns <= 3000LL*1000*1000) {
+                    s.rtt_ack_ms = (double)dt_ns / 1e6;
+                }
+                // 같은 TSval 반복 매칭 방지/다음 샘플을 위해 정리
+                peer.have_last_data = false;
+                peer.ts_recent_valid = false;
+            }
+        }
+    }
 
     update_throughput_window(me, pr.ts_ns, pr.wirelen);
 
@@ -193,7 +219,7 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
         uint32_t rack = rel_seq(s, dir, pr.tcp_ack);
         if (rack >= peer.last_data_seq_end) {
             double ms = (pr.ts_ns - peer.last_data_ts_ns) / 1e6;
-            if (ms >= 0.0) s.rtt_ack_ms = ms;
+            if (ms >= 0.0 && ms <= 3000) s.rtt_ack_ms = ms;
             peer.have_last_data = false;
         }
     }

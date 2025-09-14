@@ -44,6 +44,8 @@ void Decoder::decode(pcap_t& pcap, const pcap_pkthdr& h, const u_char* bytes, Pa
 }
 
 void Decoder::parse_l2_l3_l4(int dlt, const u_char* p, uint32_t rem, PacketRecord& rec){
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(p);
+    
     if (dlt == DLT_EN10MB){
         if (rem < sizeof(ether_header)) return;
         const auto* eth = reinterpret_cast<const ether_header*>(p);
@@ -53,11 +55,11 @@ void Decoder::parse_l2_l3_l4(int dlt, const u_char* p, uint32_t rem, PacketRecor
         rec.ethertype = etype;
         p   += sizeof(*eth);
         rem -= sizeof(*eth);
-        rec.l3_off = static_cast<uint32_t>(p - (const u_char*)nullptr); // 정보용(미사용)
+        rec.l3_off = static_cast<uint32_t>(p - base); // 정보용
         switch (etype){
-            case ETHERTYPE_IP:   parse_ipv4(p, rem, rec, (const uint8_t*)nullptr); break;
+            case ETHERTYPE_IP:   parse_ipv4(p, rem, rec, base); break;
             case ETHERTYPE_ARP:  parse_arp (p, rem); break;
-            case ETHERTYPE_IPV6: parse_ipv6(p, rem, rec, (const uint8_t*)nullptr); break;
+            case ETHERTYPE_IPV6: parse_ipv6(p, rem, rec, base); break;
             default: break;
         }
     } else if (dlt == DLT_LINUX_SLL){
@@ -67,16 +69,16 @@ void Decoder::parse_l2_l3_l4(int dlt, const u_char* p, uint32_t rem, PacketRecor
         p   += sizeof(*s);
         rem -= sizeof(*s);
         switch (proto){
-            case ETHERTYPE_IP:   parse_ipv4(p, rem, rec, (const uint8_t*)nullptr); break;
+            case ETHERTYPE_IP:   parse_ipv4(p, rem, rec, base); break;
             case ETHERTYPE_ARP:  parse_arp (p, rem); break;
-            case ETHERTYPE_IPV6: parse_ipv6(p, rem, rec, (const uint8_t*)nullptr); break;
+            case ETHERTYPE_IPV6: parse_ipv6(p, rem, rec, base); break;
             default: break;
         }
     } else if (dlt == DLT_RAW){
         if (rem>=1){
             uint8_t v = (p[0]>>4)&0xF;
-            if (v==4) parse_ipv4(p, rem, rec, (const uint8_t*)nullptr);
-            else if (v==6) parse_ipv6(p, rem, rec, (const uint8_t*)nullptr);
+            if (v==4) parse_ipv4(p, rem, rec, base);
+            else if (v==6) parse_ipv6(p, rem, rec, base);
         }
     }
 }
@@ -92,7 +94,7 @@ void Decoder::parse_ipv4(const uint8_t* p, uint32_t len, PacketRecord& rec, cons
     rec.ipv4_hdr_len = (uint16_t)ip_hl;
     std::memcpy(&rec.ipv4_src, &iph->ip_src, 4);
     std::memcpy(&rec.ipv4_dst, &iph->ip_dst, 4);
-    rec.l4_off = (uint32_t)( (p + ip_hl) - (base ? base : (const uint8_t*)0) );
+    rec.l4_off = (uint32_t)( (p + ip_hl) - base );
 
     const uint8_t* l4 = p + ip_hl;
     uint32_t l4len = len - ip_hl;
@@ -107,6 +109,42 @@ void Decoder::parse_ipv4(const uint8_t* p, uint32_t len, PacketRecord& rec, cons
         rec.tcp_flags   = (uint8_t)((th->urg<<5)|(th->ack<<4)|(th->psh<<3)|(th->rst<<2)|(th->syn<<1)|th->fin);
         rec.tcp_hdr_len = (uint8_t)thl;
         rec.l4_hdr_len  = rec.tcp_hdr_len;
+
+        //추가됨 for timestamp
+        rec.tcp_ts_present = false;
+        rec.tcp_ts_val = 0;
+        rec.tcp_ts_ecr = 0;
+        if (thl >= sizeof(tcphdr) + 1 && l4len >= thl) {
+            const uint8_t* opt = reinterpret_cast<const uint8_t*>(th) + sizeof(tcphdr);
+            size_t opt_len = thl - sizeof(tcphdr);
+            while (opt_len > 0) {
+                uint8_t kind = opt[0];
+                if (kind == 0) { // EOL
+                    break;
+                } else if (kind == 1) { // NOP
+                    opt += 1; opt_len -= 1;
+                    continue;
+                } else {
+                    if (opt_len < 2) break;
+                    uint8_t len2 = opt[1];
+                    if (len2 < 2 || len2 > opt_len) break;
+
+                    if (kind == 8 && len2 == 10) { // Timestamp option
+                        // |kind=8|len=10| TSval(4) | TSecr(4) |
+                        uint32_t tsval_net, tsecr_net;
+                        std::memcpy(&tsval_net, opt+2, 4);
+                        std::memcpy(&tsecr_net, opt+6, 4);
+                        rec.tcp_ts_val = ntohl(tsval_net);
+                        rec.tcp_ts_ecr = ntohl(tsecr_net);
+                        rec.tcp_ts_present = true;
+                        // TS는 중복 가능성 낮아도, 혹시 여러 개면 첫 번째만 사용
+                        // 계속 파싱해도 되지만 여기서는 첫 매칭 후 종료
+                        // break;  // 필요시 주석 해제
+                    }
+                    opt += len2; opt_len -= len2;
+                }
+            }
+        }
     } else if (iph->ip_p == IPPROTO_UDP && l4len >= sizeof(udphdr)){
         const udphdr* uh = reinterpret_cast<const udphdr*>(l4);
         rec.sport      = ntohs(uh->source);

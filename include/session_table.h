@@ -46,6 +46,11 @@ struct DirStats {
     // RTT 측정을 위해 최근 전송 데이터의 seq_end 저장 = last_seq+데이터 바이트수
     uint32_t last_data_seq_end{0};
     bool     have_last_data{false};
+    // RTT 타임스템프 추가됨
+    bool     ts_recent_valid = false;
+    uint32_t ts_recent_val   = 0;      
+    uint64_t ts_recent_time_ns = 0;   
+
     // 마지막 페이로드가 있는 데이터 전송 시각 RTT에서 사용
     uint64_t last_data_ts_ns{0};
 
