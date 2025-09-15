@@ -42,6 +42,29 @@ void Decoder::decode(pcap_t& pcap, const pcap_pkthdr& h, const u_char* bytes, Pa
         rec.payload_copy.assign(bytes + rec.payload_off, bytes + rec.payload_off + to_copy);
     }
 }
+// pcap 핸들 없이 DLT를 직접 지정하는 경로(미러 수신용)
+void Decoder::decode_dlt(int dlt, const pcap_pkthdr& h, const u_char* bytes, PacketRecord& rec){
+    if (!bytes) return;
+    if (h.caplen == 0) return;
+    rec.ts_ns  = tv_to_ns(h.ts);
+    rec.caplen = h.caplen;
+    rec.wirelen= h.len;
+    rec.dlt    = dlt;
+    rec.l2_off = 0U;
+    parse_l2_l3_l4(rec.dlt, bytes, h.caplen, rec);
+
+    if (rec.l4_off && rec.l4_hdr_len && rec.caplen >= rec.l4_off + rec.l4_hdr_len) {
+        uint32_t after = rec.l4_off + rec.l4_hdr_len;
+        rec.payload_off = after;
+        rec.payload_len = (rec.caplen >= after) ? (rec.caplen - after) : 0;
+    } else {
+        rec.payload_off = rec.payload_len = 0;
+    }
+    if (rec.payload_len&&rec.payload_off+rec.payload_len<=rec.caplen){
+        uint32_t to_copy = rec.payload_len > PAYLOAD_STORE_LIMIT ? PAYLOAD_STORE_LIMIT : rec.payload_len;
+        rec.payload_copy.assign(bytes + rec.payload_off, bytes + rec.payload_off + to_copy);
+    }
+}
 
 void Decoder::parse_l2_l3_l4(int dlt, const u_char* p, uint32_t rem, PacketRecord& rec){
     const uint8_t* base = reinterpret_cast<const uint8_t*>(p);

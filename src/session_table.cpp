@@ -46,6 +46,8 @@ void SessionTable::update_from_packet(const PacketRecord& pr)
     // TCP 상태/RTT
     if (sess.is_tcp) update_tcp(sess, kd.dir, pr);
 }
+
+//display tool
 void SessionTable::dump_top(size_t N) const {
     struct Row{
         const Session* s; uint64_t bytes;
@@ -71,7 +73,7 @@ void SessionTable::dump_top(size_t N) const {
             "state=%s  rtt_syn=%.2fms  rtt_ack=%.2fms\n"
             "    A->B: inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n"
             "    B->A: inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n",
-            i+1, a, ntohs(s.key.sport), b, ntohs(s.key.dport), s.key.proto,
+            i+1, a, s.key.sport, b, s.key.dport, s.key.proto,
             (unsigned long long)rows[i].bytes,
             (unsigned long long)(s.dir[0].pkts + s.dir[1].pkts),
             tcp_state_name(s.state),
@@ -84,17 +86,20 @@ void SessionTable::dump_top(size_t N) const {
     }
 }
 
+//ip port 크기비교
 bool SessionTable::less_pair(uint32_t ip1, uint16_t p1, uint32_t ip2, uint16_t p2) {
     if (ip1!=ip2) return ip1<ip2;
     return p1<=p2;
 }
 
+// state name
 const char* SessionTable::tcp_state_name(TcpState st){
     switch(st){
         case TcpState::NONE: return "NONE";
         case TcpState::SYN_SENT: return "SYN_SENT";
         case TcpState::SYN_RECV: return "SYN_RECV";
         case TcpState::ESTABLISHED: return "ESTABLISHED";
+        case TcpState::MID_ESTABLISHED: return "MID_ESTABLISHED";
         case TcpState::FIN: return "FIN";
         case TcpState::RST: return "RST";
         case TcpState::CLOSED: return "CLOSED";
@@ -102,6 +107,7 @@ const char* SessionTable::tcp_state_name(TcpState st){
     return "?";
 }
 
+//throughput 계산식
 void SessionTable::update_throughput_window(DirStats& d, uint64_t now_ns, uint64_t add_bytes) {
     if (d.win_start_ns==0) d.win_start_ns = now_ns;
     d.win_bytes += add_bytes;
@@ -111,7 +117,7 @@ void SessionTable::update_throughput_window(DirStats& d, uint64_t now_ns, uint64
         double bps  = (secs>0.0) ? (d.win_bytes * 8.0) / secs : 0.0;
         d.inst_bps = bps;
 
-        // EWMA (tau = 3s 권장)
+        // EWMA (tau = 3s 권장) ||(1-a)*ewma_bps + a+bps; a = 1-e^(-s/t);||
         double tau = 3.0;
         double alpha = 1.0 - std::exp(-secs / tau);
         d.ewma_bps = (1.0 - alpha) * d.ewma_bps + alpha * bps;
@@ -121,11 +127,13 @@ void SessionTable::update_throughput_window(DirStats& d, uint64_t now_ns, uint64
     }
 }
 
+//relative sequence = 초기 seq값 0으로 보는거.
 uint32_t SessionTable::rel_seq(const Session& s, int dir, uint32_t seq) {
     if (!s.isn_set[dir]) return seq; // ISN 미설정 시 원시값
     return seq - s.isn[dir];         // 32비트 wrap-safe
 }
 
+//패킷, 방향, 세션값으로 tcp 상태 확인하는 블록
 void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
     // 플래그
     const uint8_t f = pr.tcp_flags;
@@ -135,9 +143,15 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
     const bool RST = f & 0x04;
 
     // 상태전이(아주 단순화)
+    if (s.state == TcpState::NONE && !SYN) {
+        s.state = TcpState::MID_ESTABLISHED;
+        s.midstream = true;
+        // rel_seq()가 먹히도록 해당 방향의 베이스라인을 바로 박제
+        if (!s.isn_set[dir]) { s.isn[dir] = pr.tcp_seq; s.isn_set[dir] = true; }
+    }
     if (SYN && !ACK) {                 // A->B SYN
         s.state = TcpState::SYN_SENT;
-        s.syn_ts_valid = true; 
+        s.syn_ts_valid = true;
         s.syn_ts_ns = pr.ts_ns;
         if(!s.isn_set[dir]){ s.isn[dir]= pr.tcp_seq; s.isn_set[dir]=true; }
     } else if (SYN && ACK) {           // B->A SYN-ACK
@@ -153,6 +167,11 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
     }
     if (FIN) s.state = TcpState::FIN;
     if (RST) s.state = TcpState::RST;
+
+    // 양방향 관측되면 MID->ESTABLISHED
+    if (s.state == TcpState::MID_ESTABLISHED && (s.dir[0].pkts > 0 && s.dir[1].pkts > 0)) {
+        s.state = TcpState::ESTABLISHED;  
+    }
 
     // 방향별 seq/ack 저장
     DirStats& me = s.dir[dir];

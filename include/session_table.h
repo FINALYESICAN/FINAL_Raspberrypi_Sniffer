@@ -72,7 +72,7 @@ struct DirStats {
 };
 
 enum class TcpState : uint8_t {
-    NONE, SYN_SENT, SYN_RECV, ESTABLISHED, FIN, RST, CLOSED
+    NONE, SYN_SENT, SYN_RECV, ESTABLISHED, MID_ESTABLISHED, FIN, RST, CLOSED
 };
 
 struct Session {
@@ -84,6 +84,8 @@ struct Session {
 
     // TCP 상태/RTT
     TcpState state{TcpState::NONE};
+    bool midstream{false};
+    
     // SYN RTT
     bool     syn_ts_valid{false};
     uint64_t syn_ts_ns{0};      // A->B SYN 시간

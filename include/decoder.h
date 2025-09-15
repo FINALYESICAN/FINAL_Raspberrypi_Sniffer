@@ -8,6 +8,7 @@
 class Decoder {
 public:
     void decode(pcap_t& pcap, const pcap_pkthdr& h, const u_char* bytes, PacketRecord& out);
+    void decode_dlt(int dlt, const pcap_pkthdr& h, const u_char* bytes, PacketRecord& out);
 private:
     static uint64_t tv_to_ns(const timeval& tv){
         return (uint64_t)tv.tv_sec*1000000000ull + (uint64_t)tv.tv_usec*1000ull;
