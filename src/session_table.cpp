@@ -4,6 +4,74 @@
 #include <cmath>
 #include <arpa/inet.h>
 
+// 파일: session_table.cpp 상단
+static void dump_session_line(const Session& s){
+    char a[64]={0}, b[64]={0};
+    in_addr ia{.s_addr=s.key.sip}, ib{.s_addr=s.key.dip};
+    inet_ntop(AF_INET, &ia, a, sizeof(a));
+    inet_ntop(AF_INET, &ib, b, sizeof(b));
+
+    const char* roleA = s.direction_known ? (s.client_is_A ? "CLIENT" : "SERVER") : "?";
+    const char* roleB = s.direction_known ? (s.client_is_A ? "SERVER" : "CLIENT") : "?";
+
+    std::printf("[SESS] %s:%u(%s) <-> %s:%u(%s) proto=%u pkts=%llu state=%s dirKnown=%d\n",
+        a, s.key.sport, roleA, b, s.key.dport, roleB, s.key.proto,
+        (unsigned long long)(s.dir[0].pkts + s.dir[1].pkts),
+        SessionTable::tcp_state_name(s.state),
+        (int)s.direction_known
+    );
+}
+
+// session_table.cpp (새 함수) : 첫 TCP 패킷들로 client/server 확정
+static void decide_tcp_direction_on_first(Session& s, int kd_dir, const PacketRecord& pr){
+    const bool SYN = pr.tcp_flags & 0x02;
+    const bool ACK = pr.tcp_flags & 0x10;
+
+    if (SYN && !ACK) {             // 순수 SYN = 클라이언트
+        s.client_ip   = pr.ipv4_src;
+        s.client_port = pr.sport;
+        s.server_ip   = pr.ipv4_dst;
+        s.server_port = pr.dport;
+        // 이번 패킷의 캐노니컬 방향(kd_dir)이 A->B(0)라면 A가 client, 아니면 B가 client
+        s.client_is_A = (kd_dir == 0);
+        s.direction_known = true;
+    } else if (SYN && ACK) {       // SYN-ACK = 서버 응답
+        s.client_ip   = pr.ipv4_dst;
+        s.client_port = pr.dport;
+        s.server_ip   = pr.ipv4_src;
+        s.server_port = pr.sport;
+        s.client_is_A = (kd_dir == 1); // 이 경우 보통 B->A(1)이므로 B가 client
+        s.direction_known = true;
+    } else if (!s.direction_known) {
+        // 미드스트림/애매하면 임시 휴리스틱 (포트 비교 등)
+        if (pr.sport > pr.dport) {
+            s.client_ip = pr.ipv4_src; s.client_port = pr.sport;
+            s.server_ip = pr.ipv4_dst; s.server_port = pr.dport;
+            s.client_is_A = (kd_dir == 0);
+        } else {
+            s.client_ip = pr.ipv4_dst; s.client_port = pr.dport;
+            s.server_ip = pr.ipv4_src; s.server_port = pr.sport;
+            s.client_is_A = (kd_dir == 1);
+        }
+        s.direction_known = false; // 휴리스틱은 ‘임시’로 표시(나중에 SYN/SYN-ACK 오면 덮어씀)
+    }
+}
+
+// 이번 패킷이 의미상 C->S(0)인지 S->C(1)인지 계산하고, 그걸 A/B 인덱스로 변환
+static int map_logical_dir_to_AB(const Session& s, const PacketRecord& pr, int kd_dir){
+    // 의미 방향 계산: client_ip/port와 src가 같으면 C->S(0), 아니면 S->C(1)
+    int logical = 0; // 0=C->S, 1=S->C
+    if (s.direction_known) {
+        bool from_client = (pr.ipv4_src == s.client_ip && pr.sport == s.client_port);
+        logical = from_client ? 0 : 1;
+    } else {
+        // 아직 모르면 캐노니컬 방향(kd_dir)로 대체
+        logical = (kd_dir == 0) ? 0 : 1;
+    }
+    // A/B 인덱스로 변환: A가 client이면 logical 그대로, B가 client면 뒤집기
+    return s.client_is_A ? logical : (logical ^ 1);
+}
+
 SessionTable::KeyDir SessionTable::canonical_from_packet(const PacketRecord& pr){
     KeyDir kd{};
     kd.key.proto = pr.l4_proto;
@@ -29,6 +97,12 @@ void SessionTable::update_from_packet(const PacketRecord& pr)
     auto kd = canonical_from_packet(pr);
     //세션 데이터를 확인하고, 만약 첫 데이터면 세션키 등록, 시간 등록, tcp 등록
     auto& sess = map[kd.key];
+
+    // 상태 초기화
+    bool created_now = false;
+    bool direction_became_known = false;
+    TcpState prev_state = sess.state;
+    
     if (sess.first_ts_ns==0) {
         sess.key = kd.key;
         sess.first_ts_ns = pr.ts_ns;
@@ -38,13 +112,38 @@ void SessionTable::update_from_packet(const PacketRecord& pr)
     sess.last_ts_ns = pr.ts_ns;
 
     //방향에 맞는 세션 스탯 가져와서 거기에 패킷 데이터 저장.
-    DirStats& d = sess.dir[kd.dir];
-    d.pkts  += 1;
-    d.bytes += pr.wirelen;
-    d.last_ts_ns = pr.ts_ns;
+    if(sess.is_tcp){
+        bool before = sess.direction_known;
+        decide_tcp_direction_on_first(sess, kd.dir, pr);
+        if (!before && sess.direction_known) direction_became_known = true;
+        // 의미 방향(C->S=0 / S->C=1) → A/B 인덱스로 매핑
+        int ab_dir = map_logical_dir_to_AB(sess, pr, kd.dir);
 
-    // TCP 상태/RTT
-    if (sess.is_tcp) update_tcp(sess, kd.dir, pr);
+        DirStats& d = sess.dir[ab_dir];
+        d.pkts  += 1;
+        d.bytes += pr.wirelen;
+        d.last_ts_ns = pr.ts_ns;
+        update_tcp(sess, kd.dir, pr);
+    } else {
+        DirStats& d = sess.dir[kd.dir];
+        d.pkts  += 1;
+        d.bytes += pr.wirelen;
+        d.last_ts_ns = pr.ts_ns;
+    }
+    // ====== 여기서 '변경 이벤트'를 찍는다 ======
+    if (created_now) {
+        std::puts("[EVT] session_created");
+        dump_session_line(sess);
+    }
+    if (direction_became_known) {
+        std::puts("[EVT] direction_decided");
+        dump_session_line(sess);
+    }
+    if (sess.state != prev_state) {
+        std::printf("[EVT] tcp_state_change: %s -> %s\n",
+            tcp_state_name(prev_state), tcp_state_name(sess.state));
+        dump_session_line(sess);
+    }
 }
 
 //display tool
@@ -68,21 +167,62 @@ void SessionTable::dump_top(size_t N) const {
         in_addr ia{.s_addr=s.key.sip}, ib{.s_addr=s.key.dip};
         inet_ntop(AF_INET, &ia, a, sizeof(a));
         inet_ntop(AF_INET, &ib, b, sizeof(b));
+
+        // client/server 표시용 문자열
+        const char* roleA = s.direction_known ? (s.client_is_A ? "CLIENT" : "SERVER") : "?";
+        const char* roleB = s.direction_known ? (s.client_is_A ? "SERVER" : "CLIENT") : "?";
+
+        // (선택) client/server IP:PORT 문자열 준비
+        char cstr[64] = "-", sstr[64] = "-";
+        uint16_t cport = 0, sport = 0;
+        if (s.direction_known) {
+            in_addr ic{.s_addr=s.client_ip}, is{.s_addr=s.server_ip};
+            inet_ntop(AF_INET, &ic, cstr, sizeof(cstr));
+            inet_ntop(AF_INET, &is, sstr, sizeof(sstr));
+            cport = s.client_port;
+            sport = s.server_port;
+        }
+
         std::printf(
             "%2zu) %s:%u <-> %s:%u  proto=%u  bytes=%llu  pkts=%llu  "
-            "state=%s  rtt_syn=%.2fms  rtt_ack=%.2fms\n"
-            "    A->B: inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n"
-            "    B->A: inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n",
-            i+1, a, s.key.sport, b, s.key.dport, s.key.proto,
+            "state=%s  rtt_syn=%.2fms  rtt_ack=%.2fms\n",
+            (size_t)(i+1),               // %zu
+            a,                           // %s (src ip)
+            (unsigned)s.key.sport,       // %u (src port: uint16_t -> unsigned)
+            b,                           // %s (dst ip)
+            (unsigned)s.key.dport,       // %u (dst port)
+            (unsigned)s.key.proto,       // %u (proto: uint8_t -> unsigned)
             (unsigned long long)rows[i].bytes,
             (unsigned long long)(s.dir[0].pkts + s.dir[1].pkts),
             tcp_state_name(s.state),
-            s.rtt_syn_ms, s.rtt_ack_ms,
+            s.rtt_syn_ms, s.rtt_ack_ms
+        );
+        if (s.direction_known) {
+            // 의미 방향으로 재라벨링: C->S / S->C
+            const DirStats& cs = s.client_is_A ? s.dir[0] : s.dir[1]; // C->S
+            const DirStats& sc = s.client_is_A ? s.dir[1] : s.dir[0]; // S->C
+
+            std::printf(
+                "    Client: %s:%u  Server: %s:%u\n"
+                "    C->S:  inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n"
+                "    S->C:  inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n",
+                cstr, cport, sstr, sport,
+                cs.inst_bps, cs.ewma_bps,
+                (unsigned long long)cs.retrans_pkts, (unsigned long long)cs.ooo_pkts, cs.dup_ack_run,
+                sc.inst_bps, sc.ewma_bps,
+                (unsigned long long)sc.retrans_pkts, (unsigned long long)sc.ooo_pkts, sc.dup_ack_run
+            );
+        } else {
+        // 아직 모르면 기존 라벨(A->B / B->A) 유지
+        std::printf(
+            "    A->B: inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n"
+            "    B->A: inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n",
             s.dir[0].inst_bps, s.dir[0].ewma_bps,
             (unsigned long long)s.dir[0].retrans_pkts, (unsigned long long)s.dir[0].ooo_pkts, s.dir[0].dup_ack_run,
             s.dir[1].inst_bps, s.dir[1].ewma_bps,
             (unsigned long long)s.dir[1].retrans_pkts, (unsigned long long)s.dir[1].ooo_pkts, s.dir[1].dup_ack_run
         );
+        }
     }
 }
 

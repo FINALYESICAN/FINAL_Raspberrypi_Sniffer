@@ -82,6 +82,12 @@ struct Session {
     DirStats dir[2];
     bool is_tcp{false};
 
+    // direction 추가
+    bool direction_known{false}; // client/server 매핑
+    bool client_is_A{true};      // true면 A(캐노니컬의 src쪽)가 client, false면 B가 client
+    uint32_t client_ip{0}, server_ip{0};
+    uint16_t client_port{0}, server_port{0};
+
     // TCP 상태/RTT
     TcpState state{TcpState::NONE};
     bool midstream{false};
@@ -119,10 +125,10 @@ public:
     // 상위 N 세션(바이트 합계 기준) 덤프
     void dump_top(size_t N = 10) const;
 
+    static const char* tcp_state_name(TcpState st);
+
 private:
     static bool less_pair(uint32_t ip1, uint16_t p1, uint32_t ip2, uint16_t p2);
-
-    static const char* tcp_state_name(TcpState st);
 
     static void update_throughput_window(DirStats& d, uint64_t now_ns, uint64_t add_bytes);
 
