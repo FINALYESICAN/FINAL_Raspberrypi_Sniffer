@@ -1,4 +1,5 @@
 // main.cpp
+#include <cstdint>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -7,8 +8,12 @@
 #include "packet_list.h"
 #include "session_table.h"
 #include "packet_record.h"
-//추가됨.
+//for mirroring snort
 #include "mirror_rx.h"
+#include <thread>
+#include <chrono>
+//telemetric
+#include "TelemetryServer.h"
 
 static volatile sig_atomic_t g_stop = 0;
 static Capture* g_cap = nullptr;
@@ -20,6 +25,7 @@ static void on_sigint(int){
         }
     }
 }
+
 
 int main(int argc, char** argv){
     //ctrl-c누르면 종료
@@ -35,6 +41,26 @@ int main(int argc, char** argv){
     SessionTable sess;           // 세션 테이블 
     PacketList   pkts;           // 최근 패킷 보관/디버깅
     Decoder      dec;            // L2/L3/L4 디코더
+
+    TelemetryServer tel;
+    tel.start(&sess, 55555, 1000);
+
+    // === 별도 프루닝 스레드: 1초마다 sess.prune() ===
+    std::thread prune_worker([&]{
+        using namespace std::chrono;
+        while (!g_stop) {
+            // rec.ts_ns가 epoch ns이므로 REALTIME epoch 사용
+            auto now = system_clock::now();
+            uint64_t now_ns = duration_cast<nanoseconds>(now.time_since_epoch()).count();
+            size_t removed = sess.prune(now_ns);
+            if (removed > 0) {
+                std::printf("[PRUNE] removed=%zu, remaining=%zu\n", removed, sess.size());
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    });
+
+    uint64_t last_prune_ns = 0;
 
     if(use_mirror){
         MirrorReceiver rx;
@@ -56,10 +82,18 @@ int main(int argc, char** argv){
             dec.decode_dlt(mh.linktype, h, bytes, rec);
             sess.update_from_packet(rec);
             pkts.push(std::move(rec));
+
+            // if (last_prune_ns == 0) last_prune_ns = h.ts.tv_sec*1000000000ull + (uint64_t)h.ts.tv_usec*1000ull;
+            // auto now_ns = (uint64_t)h.ts.tv_sec*1000000000ull + (uint64_t)h.ts.tv_usec*1000ull;
+            // if (now_ns - last_prune_ns >= 1ULL*1000*1000*1000) {
+            //     size_t removed = sess.prune(now_ns);
+            //     printf("[prune] mirror removed=%zu, table=%zu\n", removed, sess.size());
+            //     last_prune_ns = now_ns;
+            // }        
         }, [&](){return g_stop!=0;});
     }else{
         const char* dev = argv[1];
-        const char* bpf = (argc>=3 && std::strcmp(argv[2],"nano")!=0) ? argv[2] : nullptr;
+        const char* user_bpf = (argc>=3 && std::strcmp(argv[2],"nano")!=0) ? argv[2] : nullptr;
         bool want_nano = (argc>=3 && std::strcmp(argv[2],"nano")==0) ||
                         (argc>=4 && std::strcmp(argv[3],"nano")==0);
 
@@ -67,7 +101,15 @@ int main(int argc, char** argv){
         if (!cap.open(dev, /*snaplen=*/65535, /*promisc=*/true, /*timeout_ms=*/500,
                     /*bufsz=*/4*1024*1024, want_nano)) return 2;
         g_cap = &cap;
-        if (bpf && !cap.apply_bpf(bpf)) return 3;
+
+        std::string ctrl_excl = "not (host 192.168.2.234 and tcp port 55555)";
+        std::string final_bpf;
+        if(user_bpf){
+            final_bpf = "(" + std::string(user_bpf)+") and " +ctrl_excl;
+        }else{
+            final_bpf = ctrl_excl;
+        }
+        if (!cap.apply_bpf(final_bpf.c_str())) return 3;
         
         //콜백함수를 만든다. pkthdr값, 포인터 초기위치 받아서 시작함.
         auto cb = [&](const pcap_pkthdr* h, const u_char* bytes){
@@ -75,6 +117,13 @@ int main(int argc, char** argv){
             dec.decode(*cap.handle(), *h, bytes, rec, want_nano);
             sess.update_from_packet(rec);
             pkts.push(std::move(rec));
+
+            // // ★ 1초마다 프루닝
+            // if (last_prune_ns == 0) last_prune_ns = rec.ts_ns;
+            // if (rec.ts_ns - last_prune_ns >= 1ULL*1000*1000*1000) {
+            //     size_t removed = sess.prune(rec.ts_ns);
+            //     last_prune_ns = rec.ts_ns;
+            // }
         };
 
         //캡쳐 루프 돈다.
@@ -90,5 +139,7 @@ int main(int argc, char** argv){
         pkts.dump_tail(5);
         sess.dump_top(10);           // 바이트 상위 세션/RTT 출력(기존 API) :contentReference[oaicite:5]{index=5}
     }
+    tel.stop();
+    if (prune_worker.joinable()) prune_worker.join();
     return 0;
 }

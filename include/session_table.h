@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <array>
 #include <vector>
+#include <mutex>
 
 static inline double ns_to_sec(uint64_t ns){return ns/1e9;}
 
@@ -56,6 +57,7 @@ struct DirStats {
 
     // --- Throughput용 ---
     // 1초 슬라이딩 윈도우(간단): 윈도우 내 바이트/시간으로 즉시 bps 계산
+    uint64_t last_rate_calc_ns{0};
     uint64_t win_start_ns{0};
     uint64_t win_bytes{0};
     double   inst_bps{0.0};    // 직전 윈도우에서 계산된 bps
@@ -77,7 +79,8 @@ enum class TcpState : uint8_t {
 
 struct Session {
     FiveTuple key{}; //세션 키
-    uint64_t first_ts_ns{0}, last_ts_ns{0}; //
+    uint64_t first_ts_ns{0}, last_ts_ns{0};
+    bool closed{false};
     //각 방향마다의 패킷 정보, 0=정규화 기준 (A->B), 1=반대(B->A)
     DirStats dir[2];
     bool is_tcp{false};
@@ -108,10 +111,16 @@ struct Session {
     bool     tsopt_seen{false};
 };
 
+struct SessionTimeouts {
+    uint64_t tcp_est_ns      = 120ULL*1000*1000*1000; // ESTABLISHED idle 120s
+    uint64_t tcp_mid_ns      = 30ULL *1000*1000*1000; // MID_ESTABLISHED 30s
+    uint64_t tcp_handshake_ns= 10ULL *1000*1000*1000; // SYN_SENT/SYN_RECV 10s
+    uint64_t udp_ns          = 30ULL *1000*1000*1000; // UDP idle 30s
+    uint64_t closed_grace_ns = 5ULL  *1000*1000*1000; // FIN/RST 후 5s
+};
+
 class SessionTable {
 public:
-    // 세션 저장소
-    std::unordered_map<FiveTuple, Session, FiveTupleHash> map;
     // 패킷으로부터 키 생성 + 방향 판정
     // ret.dir = 0 (A->B) or 1 (B->A) in canonical orientation.
     struct KeyDir { FiveTuple key; int dir; };
@@ -127,7 +136,19 @@ public:
 
     static const char* tcp_state_name(TcpState st);
 
+    //timeout 확인
+    void set_timeouts(const SessionTimeouts& t) { timeouts = t; }
+
+    size_t prune(uint64_t now_ns); // 만료/종료 세션 제거
+
+    size_t size() const { std::lock_guard<std::mutex> lk(mtx); return map.size(); }
 private:
+    // mutex
+    mutable std::mutex mtx;
+
+    // 세션 저장소
+    std::unordered_map<FiveTuple, Session, FiveTupleHash> map;
+
     static bool less_pair(uint32_t ip1, uint16_t p1, uint32_t ip2, uint16_t p2);
 
     static void update_throughput_window(DirStats& d, uint64_t now_ns, uint64_t add_bytes);
@@ -135,4 +156,6 @@ private:
     static uint32_t rel_seq(const Session& s, int dir, uint32_t seq);
 
     static void update_tcp(Session& s, int dir, const PacketRecord& pr);
+
+    SessionTimeouts timeouts;
 };
