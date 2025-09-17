@@ -20,8 +20,8 @@ struct sll_header {
     uint16_t proto;
 } __attribute__((packed));
 
-void Decoder::decode(pcap_t& pcap, const pcap_pkthdr& h, const u_char* bytes, PacketRecord& rec){
-    rec.ts_ns  = tv_to_ns(h.ts);
+void Decoder::decode(pcap_t& pcap, const pcap_pkthdr& h, const u_char* bytes, PacketRecord& rec, bool is_nano){
+    rec.ts_ns  = tv_to_ns(h.ts,is_nano);
     rec.caplen = h.caplen;
     rec.wirelen= h.len;
     rec.dlt    = pcap_datalink(&pcap);
@@ -46,10 +46,10 @@ void Decoder::decode(pcap_t& pcap, const pcap_pkthdr& h, const u_char* bytes, Pa
 void Decoder::decode_dlt(int dlt, const pcap_pkthdr& h, const u_char* bytes, PacketRecord& rec){
     if (!bytes) return;
     if (h.caplen == 0) return;
-    rec.ts_ns  = tv_to_ns(h.ts);
-    rec.caplen = h.caplen;
-    rec.wirelen= h.len;
-    rec.dlt    = dlt;
+    // rec.ts_ns  = tv_to_ns(h.ts,is_nano);
+    // rec.caplen = h.caplen;
+    // rec.wirelen= h.len;
+    // rec.dlt    = dlt;
     rec.l2_off = 0U;
     parse_l2_l3_l4(rec.dlt, bytes, h.caplen, rec);
 

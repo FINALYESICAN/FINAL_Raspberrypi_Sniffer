@@ -107,6 +107,7 @@ void SessionTable::update_from_packet(const PacketRecord& pr)
         sess.key = kd.key;
         sess.first_ts_ns = pr.ts_ns;
         sess.is_tcp = (pr.l4_proto==6);
+        created_now = true;
     }
     //마지막 ts값으로 잡은 패킷값 처리.
     sess.last_ts_ns = pr.ts_ns;
@@ -123,13 +124,14 @@ void SessionTable::update_from_packet(const PacketRecord& pr)
         d.pkts  += 1;
         d.bytes += pr.wirelen;
         d.last_ts_ns = pr.ts_ns;
-        update_tcp(sess, kd.dir, pr);
+        update_tcp(sess, ab_dir, pr);
     } else {
         DirStats& d = sess.dir[kd.dir];
         d.pkts  += 1;
         d.bytes += pr.wirelen;
         d.last_ts_ns = pr.ts_ns;
     }
+
     // ====== 여기서 '변경 이벤트'를 찍는다 ======
     if (created_now) {
         std::puts("[EVT] session_created");
@@ -289,6 +291,7 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
         // rel_seq()가 먹히도록 해당 방향의 베이스라인을 바로 박제
         if (!s.isn_set[dir]) { s.isn[dir] = pr.tcp_seq; s.isn_set[dir] = true; }
     }
+
     if (SYN && !ACK) {                 // A->B SYN
         s.state = TcpState::SYN_SENT;
         s.syn_ts_valid = true;
@@ -325,23 +328,22 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
         me.ts_recent_time_ns = pr.ts_ns;
         me.ts_recent_valid = true;
 
-        // ▼ '상대가 나의 마지막 데이터'를 확인하는 ACK 순간에만 TS RTT 측정
-        if (ACK && peer.have_last_data) {
-            uint32_t rack = rel_seq(s, dir, pr.tcp_ack);
-            if (rack >= peer.last_data_seq_end &&
-                peer.ts_recent_valid &&
-                pr.tcp_ts_ecr != 0 &&
-                pr.tcp_ts_ecr == peer.ts_recent_val) {
+        // 상대방이 내 tsval을 echo했을 때만 RTT로 인정
+        if (peer.ts_recent_valid &&
+            pr.tcp_ts_ecr != 0 &&
+            pr.tcp_ts_ecr == peer.ts_recent_val)
+        {
+            const int64_t dt_ns = (int64_t)pr.ts_ns - (int64_t)peer.ts_recent_time_ns;
 
-                const int64_t dt_ns = (int64_t)pr.ts_ns - (int64_t)peer.ts_recent_time_ns;
-                // 0 <= RTT <= 3000ms (환경에 맞게 튜닝)
-                if (dt_ns >= 0 && dt_ns <= 3000LL*1000*1000) {
-                    s.rtt_ack_ms = (double)dt_ns / 1e6;
-                }
-                // 같은 TSval 반복 매칭 방지/다음 샘플을 위해 정리
-                peer.have_last_data = false;
-                peer.ts_recent_valid = false;
+            // 로컬 즉시-ACK (수십 µs) 무시, 1ms~3000ms 사이만 인정
+            if (dt_ns >= 1LL*1000*1000 && dt_ns <= 3000LL*1000*1000) {
+                std::printf("[TS-RTT] dir=%d dt=%.3f ms (tsecr=%u)\n",
+                            dir, (double)dt_ns/1e6, pr.tcp_ts_ecr);
+                s.rtt_ack_ms = (double)dt_ns / 1e6;
             }
+
+            // 같은 TSval 반복 매칭 방지
+            peer.ts_recent_valid = false;
         }
     }
 

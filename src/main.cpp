@@ -68,13 +68,11 @@ int main(int argc, char** argv){
                     /*bufsz=*/4*1024*1024, want_nano)) return 2;
         g_cap = &cap;
         if (bpf && !cap.apply_bpf(bpf)) return 3;
-
-
         
         //콜백함수를 만든다. pkthdr값, 포인터 초기위치 받아서 시작함.
         auto cb = [&](const pcap_pkthdr* h, const u_char* bytes){
             PacketRecord rec;        // 메타데이터 저장 구조체 (기존) :contentReference[oaicite:4]{index=4}
-            dec.decode(*cap.handle(), *h, bytes, rec);
+            dec.decode(*cap.handle(), *h, bytes, rec, want_nano);
             sess.update_from_packet(rec);
             pkts.push(std::move(rec));
         };
