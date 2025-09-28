@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 #include <arpa/inet.h>
 
 // 상태별 권장 idle 타임아웃
@@ -195,6 +196,49 @@ static void print_session(const Session& s, size_t ordinal, uint64_t total_bytes
 static void dump_session_line(const Session& s){
     uint64_t total_bytes = s.dir[0].bytes + s.dir[1].bytes;
     print_session(s, /*ordinal=*/0, total_bytes, /*detailed=*/false);
+}
+
+std::vector<SessionSummary> SessionTable::snapshot_top(size_t N, uint64_t now_ns) const{
+    std::vector<SessionSummary> out;
+    out.reserve(map.size());
+    for (const auto& kv : map) {
+        std::lock_guard<std::mutex> lk(mtx);
+        const FiveTuple& k = kv.first;
+        const Session&   s = kv.second;
+
+        SessionSummary ss;
+        ss.key  = k;
+        // 합계 바이트/패킷
+        ss.bytes     = s.dir[0].bytes + s.dir[1].bytes;
+        
+        ss.bytes_a2b = s.dir[0].bytes;
+        ss.bytes_b2a = s.dir[1].bytes;
+
+        ss.pkts_a2b  = s.dir[0].pkts;
+        ss.pkts_b2a  = s.dir[1].pkts;
+
+        // throughput (bps)
+        ss.inst_a2b  = s.dir[0].inst_bps;
+        ss.inst_b2a  = s.dir[1].inst_bps;
+        ss.ewma_a2b  = s.dir[0].ewma_bps;
+        ss.ewma_b2a  = s.dir[1].ewma_bps;
+
+        // RTT / 상태 / 방향
+        ss.rtt_syn_ms      = s.rtt_syn_ms;
+        ss.rtt_ack_ms      = s.rtt_ack_ms;
+        ss.state           = s.state;
+        ss.direction_known = s.direction_known;
+        ss.client_is_A     = s.client_is_A;
+
+        out.push_back(std::move(ss));
+    }
+    // 바이트 합계 기준 내림차순 정렬 후 상위 N개만
+    std::sort(out.begin(), out.end(),
+              [](const SessionSummary& a, const SessionSummary& b){
+                  return a.bytes > b.bytes;
+              });
+    if (out.size() > N) out.resize(N);
+    return out;
 }
 
 SessionTable::KeyDir SessionTable::canonical_from_packet(const PacketRecord& pr){

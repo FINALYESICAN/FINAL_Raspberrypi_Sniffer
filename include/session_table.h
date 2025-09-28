@@ -111,6 +111,30 @@ struct Session {
     bool     tsopt_seen{false};
 };
 
+struct SessionSummary{
+    FiveTuple key;            // 세션 키
+    uint64_t bytes{0};        // 총 바이트 (A->B + B->A)
+
+    uint64_t bytes_a2b{0};
+    uint64_t bytes_b2a{0};
+
+    uint64_t pkts_a2b{0};     // A->B 패킷 수
+    uint64_t pkts_b2a{0};     // B->A 패킷 수
+
+    double   inst_a2b{0.0};   // A->B 즉시 bps
+    double   inst_b2a{0.0};   // B->A 즉시 bps
+    double   ewma_a2b{0.0};   // A->B EWMA bps
+    double   ewma_b2a{0.0};   // B->A EWMA bps
+
+    double   rtt_syn_ms{-1.0};
+    double   rtt_ack_ms{-1.0};
+
+    bool     direction_known{false};
+    bool     client_is_A{true};
+
+    TcpState state{TcpState::NONE};
+};
+
 struct SessionTimeouts {
     uint64_t tcp_est_ns      = 120ULL*1000*1000*1000; // ESTABLISHED idle 120s
     uint64_t tcp_mid_ns      = 30ULL *1000*1000*1000; // MID_ESTABLISHED 30s
@@ -133,6 +157,9 @@ public:
     
     // 상위 N 세션(바이트 합계 기준) 덤프
     void dump_top(size_t N = 10) const;
+
+    //세션 서머리를 Qt로 넘긴다.
+    std::vector<SessionSummary> snapshot_top(size_t N, uint64_t now_ns) const;
 
     static const char* tcp_state_name(TcpState st);
 
