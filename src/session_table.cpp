@@ -200,38 +200,42 @@ static void dump_session_line(const Session& s){
 
 std::vector<SessionSummary> SessionTable::snapshot_top(size_t N, uint64_t now_ns) const{
     std::vector<SessionSummary> out;
-    out.reserve(map.size());
-    for (const auto& kv : map) {
+    {
         std::lock_guard<std::mutex> lk(mtx);
-        const FiveTuple& k = kv.first;
-        const Session&   s = kv.second;
+        out.reserve(map.size());
+        for (const auto& kv : map) {
+            const FiveTuple& k = kv.first;
+            const Session&   s = kv.second;
 
-        SessionSummary ss;
-        ss.key  = k;
-        // 합계 바이트/패킷
-        ss.bytes     = s.dir[0].bytes + s.dir[1].bytes;
-        
-        ss.bytes_a2b = s.dir[0].bytes;
-        ss.bytes_b2a = s.dir[1].bytes;
+            SessionSummary ss;
+            ss.key  = k;
+            // 합계 바이트/패킷
+            ss.bytes     = s.dir[0].bytes + s.dir[1].bytes;
+            
+            // 보내고 받은 패킷/바이트 수
+            ss.bytes_a2b = s.dir[0].bytes;
+            ss.bytes_b2a = s.dir[1].bytes;
 
-        ss.pkts_a2b  = s.dir[0].pkts;
-        ss.pkts_b2a  = s.dir[1].pkts;
+            ss.pkts_a2b  = s.dir[0].pkts;
+            ss.pkts_b2a  = s.dir[1].pkts;
 
-        // throughput (bps)
-        ss.inst_a2b  = s.dir[0].inst_bps;
-        ss.inst_b2a  = s.dir[1].inst_bps;
-        ss.ewma_a2b  = s.dir[0].ewma_bps;
-        ss.ewma_b2a  = s.dir[1].ewma_bps;
+            // throughput (bps)
+            ss.inst_a2b  = s.dir[0].inst_bps;
+            ss.inst_b2a  = s.dir[1].inst_bps;
+            ss.ewma_a2b  = s.dir[0].ewma_bps;
+            ss.ewma_b2a  = s.dir[1].ewma_bps;
 
-        // RTT / 상태 / 방향
-        ss.rtt_syn_ms      = s.rtt_syn_ms;
-        ss.rtt_ack_ms      = s.rtt_ack_ms;
-        ss.state           = s.state;
-        ss.direction_known = s.direction_known;
-        ss.client_is_A     = s.client_is_A;
+            // RTT / 상태 / 방향
+            ss.rtt_syn_ms      = s.rtt_syn_ms;
+            ss.rtt_ack_ms      = s.rtt_ack_ms;
+            ss.state           = s.state;
+            ss.direction_known = s.direction_known;
+            ss.client_is_A     = s.client_is_A;
 
-        out.push_back(std::move(ss));
+            out.push_back(std::move(ss));
+        }
     }
+    
     // 바이트 합계 기준 내림차순 정렬 후 상위 N개만
     std::sort(out.begin(), out.end(),
               [](const SessionSummary& a, const SessionSummary& b){
@@ -242,6 +246,7 @@ std::vector<SessionSummary> SessionTable::snapshot_top(size_t N, uint64_t now_ns
 }
 
 SessionTable::KeyDir SessionTable::canonical_from_packet(const PacketRecord& pr){
+    //key, dir 구한다.
     KeyDir kd{};
     kd.key.proto = pr.l4_proto;
     kd.key.sip   = pr.ipv4_src;
@@ -250,6 +255,7 @@ SessionTable::KeyDir SessionTable::canonical_from_packet(const PacketRecord& pr)
     kd.key.dport = pr.dport;
     // sort by (ip,port) pair
     bool keep = less_pair(kd.key.sip, kd.key.sport, kd.key.dip, kd.key.dport);
+    // 항상 ip작은게 먼저오게
     if (!keep) {
         std::swap(kd.key.sip, kd.key.dip);
         std::swap(kd.key.sport, kd.key.dport);
@@ -273,6 +279,7 @@ void SessionTable::update_from_packet(const PacketRecord& pr)
     bool direction_became_known = false;
     TcpState prev_state = sess.state;
     
+    // 처음 만들어진 상태.
     if (sess.first_ts_ns==0) {
         sess.key = kd.key;
         sess.first_ts_ns = pr.ts_ns;

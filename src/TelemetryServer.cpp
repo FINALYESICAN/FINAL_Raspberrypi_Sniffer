@@ -42,6 +42,36 @@ static std::string ip_to_str(uint32_t be_ip){
     inet_ntop(AF_INET, &ia, buf, sizeof(buf));
     return std::string(buf);
 }
+static std::string tcp_flags_str(uint8_t f){ 
+    std::string s; 
+    if(f&0x02){s+="S";} 
+    if(f&0x10){s+="A";}
+    if(f&0x01){s+="F";} 
+    if(f&0x04){s+="R";} 
+    if(f&0x08){s+="P";}
+    if(f&0x20){s+="U";}
+    return s; 
+}
+
+static std::string b64encode(const uint8_t* data, size_t len){
+    static const char* T =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out; out.reserve((len+2)/3*4);
+    size_t i=0;
+    while (i+3 <= len){
+        uint32_t v = (data[i]<<16)|(data[i+1]<<8)|data[i+2]; i+=3;
+        out.push_back(T[(v>>18)&63]); out.push_back(T[(v>>12)&63]);
+        out.push_back(T[(v>>6)&63]);  out.push_back(T[v&63]);
+    }
+    if (i<len){
+        uint32_t v = data[i]<<16; 
+        if (i+1<len) v |= data[i+1]<<8;
+        out.push_back(T[(v>>18)&63]); out.push_back(T[(v>>12)&63]);
+        out.push_back((i+1<len)?T[(v>>6)&63]:'=');
+        out.push_back('=');
+    }
+    return out;
+}
 
 bool TelemetryServer::open_listen(uint16_t port){
     listen_fd_ = make_listen(port);
@@ -51,9 +81,10 @@ bool TelemetryServer::open_listen(uint16_t port){
     return true;
 }
 
-bool TelemetryServer::start(SessionTable* table, uint16_t port, int period_ms){
+bool TelemetryServer::start(SessionTable* table, PacketList* pkts, uint16_t port, int period_ms){
     if (!table) return false;
     sess_ = table;
+    pkts_ = pkts;
     period_ms_ = period_ms;
     if (!open_listen(port)) return false;
     running_ = true;
@@ -65,7 +96,7 @@ bool TelemetryServer::start(SessionTable* table, uint16_t port, int period_ms){
 void TelemetryServer::stop(){
     running_ = false;
     if (client_fd_ >= 0) { ::shutdown(client_fd_, SHUT_RDWR);close(client_fd_); client_fd_ = -1; }
-    if (listen_fd_ >= 0) { ::shutdown(client_fd_, SHUT_RDWR);close(listen_fd_); listen_fd_ = -1; }
+    if (listen_fd_ >= 0) { ::shutdown(listen_fd_, SHUT_RDWR);close(listen_fd_); listen_fd_ = -1; }
     if (th_.joinable()) th_.join();
     std::puts("[TEL] stopped");
 }
@@ -78,6 +109,7 @@ void TelemetryServer::set_period_ms(int ms){
 void TelemetryServer::loop(){
     using namespace std::chrono;
     pollfd pfd{listen_fd_,POLLIN,0};
+
     while (running_){
         int pr = ::poll(&pfd,1,500);
         if(!running_)break;
@@ -94,7 +126,34 @@ void TelemetryServer::loop(){
         std::printf("[TEL] client connected %s:%u\n",
                     inet_ntoa(cli.sin_addr), ntohs(cli.sin_port));
 
+        pollfd cpol{client_fd_, POLLIN, 0};
+
         while (running_){
+            // 패킷 큐 드레인
+            for (int i=0; i<500 && running_; ++i) {     // 한번에 너무 많이 안 보냄
+                std::string one;
+                {
+                    std::lock_guard<std::mutex> lk(q_mtx_);
+                    if (outq_.empty()) break;
+                    one = std::move(outq_.front());
+                    outq_.pop_front();
+                }
+                send_with_prefix(one);
+                if (client_fd_ < 0) break; // 송신 에러로 끊김 감지
+            }
+            // 클라이언트 요청 수신
+            int r = ::poll(&cpol, 1, 0);
+            if (r > 0 && (cpol.revents & POLLIN)) {
+                nlohmann::json req;
+                if (!recv_one_json(req)) break; // 끊김
+                auto t = req.value("type", std::string{});
+                if (t == "PACKET_REQ") {
+                    std::printf("[TEL] PACKET_REQ recv id=%lld\n", (long long)req.value("id",0));
+                    handle_packet_req(req);
+                }
+                // (필요하면 다른 명령도 여기서 처리)
+            }
+            //session summary 보내기
             send_summary_once();
             int ms = period_ms_.load();
             for (int i=0;i<ms/50 && running_;++i) std::this_thread::sleep_for(milliseconds(50));
@@ -142,6 +201,7 @@ void TelemetryServer::send_with_prefix(const std::string& payload){
     if (!send_all(payload.data(), payload.size())) return;
 }
 
+//session summary 보내기.
 void TelemetryServer::send_summary_once(){
     if (!sess_ || client_fd_ < 0) return;
 
@@ -153,7 +213,7 @@ void TelemetryServer::send_summary_once(){
     json j;
     j["type"] = "SUMMARY";
     j["ts_ns"] = now_ns;
-    j["session"] = json::array();
+    //j["session"] = json::array();
     auto& arr = j["sessions"];
     arr = json::array();
 
@@ -228,4 +288,102 @@ void TelemetryServer::send_summary_once(){
 
     // 여기서 prefix 방식으로 송신
     send_with_prefix(j.dump());
+}
+
+void TelemetryServer::push_packet(const PacketRecord& pr){
+    json j;
+    j["type"] = "PACKET";
+    j["id"] = (long long)pr.id;
+    j["ts_usec"] = (long long)(pr.ts_ns / 1000);
+
+    json fk = {
+        {"proto",     (int)pr.l4_proto},
+        {"src_ip",    ip_to_str(pr.ipv4_src)},
+        {"src_port",  (int)pr.sport},
+        {"dst_ip",    ip_to_str(pr.ipv4_dst)},
+        {"dst_port",  (int)pr.dport}
+    };
+    j["flow_key"] = fk;
+
+    j["caplen"]   = (int)pr.caplen;
+    j["l3"] = { {"version", (int)pr.ip_version}, {"proto", (int)pr.l4_proto},
+                {"src", ip_to_str(pr.ipv4_src)}, {"dst", ip_to_str(pr.ipv4_dst)} };
+
+    if (pr.l4_proto==6) {
+        j["l4"] = { {"sport",(int)pr.sport}, {"dport",(int)pr.dport},
+                    {"flags", tcp_flags_str(pr.tcp_flags)} };
+    } else {
+        j["l4"] = { {"sport",(int)pr.sport}, {"dport",(int)pr.dport} };
+    }
+
+    if (!pr.payload_copy.empty()) {
+        size_t n = std::min<size_t>(pr.payload_copy.size(),32);
+        j["payload_b64"] = b64encode(pr.payload_copy.data(), n);
+        //j["payload_head_len"] = (int)n;
+    }
+
+    std::lock_guard<std::mutex> lk(q_mtx_);
+    if(outq_.size()>=outq_limit_) outq_.pop_front();
+    outq_.push_back(j.dump());
+}
+
+bool TelemetryServer::recv_all(void* buf, size_t len){
+    char* p = static_cast<char*>(buf);
+    size_t left = len;
+    while (left > 0){
+        ssize_t n = ::recv(client_fd_, p, left, 0);
+        if (n < 0) { 
+            if (errno==EINTR) continue; 
+            if (errno==EAGAIN||errno==EWOULDBLOCK) 
+                return false; 
+            perror("recv"); 
+            return false; 
+        }
+        if (n == 0) 
+            return false; // peer closed
+        p += n; left -= n;
+    }
+    return true;
+}
+bool TelemetryServer::recv_one_json(nlohmann::json& out){
+    uint32_t nlen_be = 0;
+    if (!recv_all(&nlen_be, 4)) return false;
+    uint32_t nlen = ntohl(nlen_be);
+    if (nlen==0 || nlen > (32u<<20)) return false; // 32MB 가드
+    std::string body; body.resize(nlen);
+    if (!recv_all(body.data(), nlen)) return false;
+    out = nlohmann::json::parse(body, nullptr, false);
+    return !out.is_discarded();
+}
+
+//base64로 변환하고 보내기.
+void TelemetryServer::handle_packet_req(const nlohmann::json& req){
+    // 우선 id 기반으로 찾기
+    uint64_t id = req.value("id", 0ull);
+    int want    = req.value("want_bytes", 512);
+
+    nlohmann::json out;
+    if (!pkts_ || id==0) {
+        out = { {"type","PACKET_NA"}, {"reason","bad request"} };
+        send_with_prefix(out.dump());
+        return;
+    }
+
+    PacketRecord pr{};
+    bool ok = pkts_->find_by_id(id, pr);                    // ★ PacketList 조회
+    if (!ok) {
+        out = { {"type","PACKET_NA"}, {"id",(long long)id}, {"reason","not found"} };
+    } else {
+        size_t n = std::min<size_t>(pr.payload_copy.size(), (size_t)want);
+        std::string b64 = n? b64encode(pr.payload_copy.data(), n) : std::string();
+        out = {
+            {"type","PACKET_DATA"},
+            {"id",(long long)id},
+            {"ts_usec",(long long)(pr.ts_ns/1000)},
+            {"caplen",(int)pr.caplen},
+            {"payload_len",(int)n},
+            {"payload_b64", b64}
+        };
+    }
+    send_with_prefix(out.dump());
 }

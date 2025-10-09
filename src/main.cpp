@@ -26,7 +26,6 @@ static void on_sigint(int){
     }
 }
 
-
 int main(int argc, char** argv){
     //ctrl-c누르면 종료
     std::signal(SIGINT, on_sigint);
@@ -43,7 +42,7 @@ int main(int argc, char** argv){
     Decoder      dec;            // L2/L3/L4 디코더
 
     TelemetryServer tel;
-    tel.start(&sess, 55555, 1000);
+    tel.start(&sess, &pkts, 55555, 1000);
 
     // === 별도 프루닝 스레드: 1초마다 sess.prune() ===
     std::thread prune_worker([&]{
@@ -81,6 +80,9 @@ int main(int argc, char** argv){
             // Decoder::parse_l2_l3_l4 직접 호출
             dec.decode_dlt(mh.linktype, h, bytes, rec);
             sess.update_from_packet(rec);
+            uint64_t id = pkts.reserved_id();
+            rec.id=id;
+            tel.push_packet(rec);   //캡쳐 콜백에서 패킷보내기.
             pkts.push(std::move(rec));
 
             // if (last_prune_ns == 0) last_prune_ns = h.ts.tv_sec*1000000000ull + (uint64_t)h.ts.tv_usec*1000ull;
@@ -116,6 +118,9 @@ int main(int argc, char** argv){
             PacketRecord rec;        // 메타데이터 저장 구조체 (기존) :contentReference[oaicite:4]{index=4}
             dec.decode(*cap.handle(), *h, bytes, rec, want_nano);
             sess.update_from_packet(rec);
+            uint64_t id = pkts.reserved_id();
+            rec.id=id;
+            tel.push_packet(rec);   //캡쳐 콜백에서 패킷보내기.
             pkts.push(std::move(rec));
 
             // // ★ 1초마다 프루닝
