@@ -94,6 +94,8 @@ struct Session {
     // TCP 상태/RTT
     TcpState state{TcpState::NONE};
     bool midstream{false};
+
+    bool report_printed{false};
     
     // SYN RTT
     bool     syn_ts_valid{false};

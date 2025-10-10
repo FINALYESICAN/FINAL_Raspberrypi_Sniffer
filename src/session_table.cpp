@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 #include <arpa/inet.h>
 
 // 상태별 권장 idle 타임아웃
@@ -105,97 +107,80 @@ static inline uint64_t pick_now_for_display(const Session& s, uint64_t now_overr
     return std::max(s.dir[0].last_ts_ns, s.dir[1].last_ts_ns);
 }
 
+// 찗은버전
+static void dump_session_line(const Session& s){
+    char a[64]={0}, b[64]={0};
+    in_addr ia{.s_addr=s.key.sip}, ib{.s_addr=s.key.dip};
+    inet_ntop(AF_INET, &ia, a, sizeof a);
+    inet_ntop(AF_INET, &ib, b, sizeof b);
 
-// print session
-// ordinal>0 이면 "1) ..." 형태, ==0이면 [SESS] 형태의 브리프 라인
-static void print_session(const Session& s, size_t ordinal, uint64_t total_bytes, bool detailed, uint64_t now_override_ns = 0)
-{
-    uint64_t now_ns = pick_now_for_display(s, now_override_ns);
+    unsigned long long pkts =
+        (unsigned long long)(s.dir[0].pkts + s.dir[1].pkts);
+    unsigned long long bytes =
+        (unsigned long long)(s.dir[0].bytes + s.dir[1].bytes);
+
+    std::printf("[SESS] %s:%u <-> %s:%u state=%s pkts=%llu bytes=%llu\n",
+        a, (unsigned)s.key.sport, b, (unsigned)s.key.dport,
+        SessionTable::tcp_state_name(s.state), pkts, bytes);
+}
+
+// 사람이 보기 좋은 바이트 단위 변환
+static std::string human_bytes(uint64_t bytes) {
+    static const char* U[] = {"B","KB","MB","GB","TB"};
+    int u = 0;
+    double v = (double)bytes;
+    while (v >= 1024.0 && u < 4) { v /= 1024.0; ++u; }
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(u==0 ? 0 : 1) << v << " " << U[u];
+    return oss.str();
+}
+
+// 세션 요약 리포트 출력 (종료 시)
+static void print_session_summary(const Session& s, const char* reason = nullptr) {
     char a[64]={0}, b[64]={0};
     in_addr ia{.s_addr=s.key.sip}, ib{.s_addr=s.key.dip};
     inet_ntop(AF_INET, &ia, a, sizeof(a));
     inet_ntop(AF_INET, &ib, b, sizeof(b));
 
-    if (ordinal > 0) {
-        std::printf(
-            "%2zu) %s:%u <-> %s:%u  proto=%u  bytes=%llu  pkts=%llu  "
-            "state=%s  rtt_syn=%.2fms  rtt_ack=%.2fms\n",
-            (size_t)ordinal,
-            a, (unsigned)s.key.sport,
-            b, (unsigned)s.key.dport,
-            (unsigned)s.key.proto,
-            (unsigned long long)total_bytes,
-            (unsigned long long)(s.dir[0].pkts + s.dir[1].pkts),
-            SessionTable::tcp_state_name(s.state),
-            s.rtt_syn_ms, s.rtt_ack_ms
-        );
-    } else {
-        // brief 라인
-        const char* roleA = s.direction_known ? (s.client_is_A ? "CLIENT" : "SERVER") : "?";
-        const char* roleB = s.direction_known ? (s.client_is_A ? "SERVER" : "CLIENT") : "?";
-        std::printf(
-            "[SESS] %s:%u(%s) <-> %s:%u(%s) proto=%u pkts=%llu state=%s dirKnown=%d\n"
-            "rtt_syn=%.2fms  rtt_ack=%.2fms\n",
-            a, s.key.sport, roleA,
-            b, s.key.dport, roleB,
-            s.key.proto,
-            (unsigned long long)(s.dir[0].pkts + s.dir[1].pkts),
-            SessionTable::tcp_state_name(s.state),
-            (int)s.direction_known,
-            s.rtt_syn_ms, s.rtt_ack_ms
-        );
-    }
-
-    if (!detailed) return;
-
-    if (s.direction_known) {
-        // 의미 방향으로 재라벨링: C->S / S->C
-        const DirStats& cs = s.client_is_A ? s.dir[0] : s.dir[1]; // C->S
-        const DirStats& sc = s.client_is_A ? s.dir[1] : s.dir[0]; // S->C
-        // preview for throughput
-        TpPreview cs_tp = preview_throughput(cs, now_ns);
-        TpPreview sc_tp = preview_throughput(sc, now_ns);
-
-        char cstr[64] = "-", sstr[64] = "-";
-        uint16_t cport = 0, sport = 0;
-        in_addr ic{.s_addr=s.client_ip}, is{.s_addr=s.server_ip};
-        inet_ntop(AF_INET, &ic, cstr, sizeof(cstr));
-        inet_ntop(AF_INET, &is, sstr, sizeof(sstr));
-        cport = s.client_port; sport = s.server_port;
-
-        std::printf(
-            "    Client: %s:%u  Server: %s:%u\n"
-            "    C->S:  inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n"
-            "    S->C:  inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n",
-            cstr, cport, sstr, sport,
-            //cs.inst_bps, cs.ewma_bps,
-            cs_tp.inst, cs_tp.ewma,
-            (unsigned long long)cs.retrans_pkts, (unsigned long long)cs.ooo_pkts, cs.dup_ack_run,
-            //sc.inst_bps, sc.ewma_bps,
-            sc_tp.inst,  sc_tp.ewma,
-            (unsigned long long)sc.retrans_pkts, (unsigned long long)sc.ooo_pkts, sc.dup_ack_run
-        );
-    } else {
-        // A/B 라벨에서도 미리보기 사용
-        TpPreview a2b = preview_throughput(s.dir[0], now_ns);
-        TpPreview b2a = preview_throughput(s.dir[1], now_ns);
-        // 아직 모르면 기존 라벨(A/B)
-        std::printf(
-            "    A->B: inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n"
-            "    B->A: inst=%.1f bps  ewma=%.1f bps  retrans=%llu  ooo=%llu  dupACKrun=%u\n",
-            //s.dir[0].inst_bps, s.dir[0].ewma_bps,
-            a2b.inst, a2b.ewma,
-            (unsigned long long)s.dir[0].retrans_pkts, (unsigned long long)s.dir[0].ooo_pkts, s.dir[0].dup_ack_run,
-            //s.dir[1].inst_bps, s.dir[1].ewma_bps,
-            b2a.inst, b2a.ewma,
-            (unsigned long long)s.dir[1].retrans_pkts, (unsigned long long)s.dir[1].ooo_pkts, s.dir[1].dup_ack_run
-        );
-    }
-}
-// 찗은버전
-static void dump_session_line(const Session& s){
+    uint64_t total_pkts  = s.dir[0].pkts + s.dir[1].pkts;
     uint64_t total_bytes = s.dir[0].bytes + s.dir[1].bytes;
-    print_session(s, /*ordinal=*/0, total_bytes, /*detailed=*/false);
+
+    // 세션 지속 시간(초)
+    double dur_sec = 0.0;
+    if (s.last_ts_ns > s.first_ts_ns) dur_sec = (s.last_ts_ns - s.first_ts_ns) / 1e9;
+
+    // 평균 처리율(세션 총량 / 지속시간)
+    double avg_bps = (dur_sec > 0) ? (total_bytes / dur_sec) : 0.0;
+
+    // RTT: 데이터 RTT가 있으면 그걸, 없으면 SYN RTT를 쓴다
+    double avg_rtt_ms = (s.rtt_ack_ms > 0) ? s.rtt_ack_ms :
+                        (s.rtt_syn_ms > 0) ? s.rtt_syn_ms : -1.0;
+
+    uint64_t retrans = s.dir[0].retrans_pkts + s.dir[1].retrans_pkts;
+
+    std::printf("===== Session Summary =====\n");
+    if (reason) std::printf("Reason: %s\n", reason);
+    std::printf("Session: %s:%u <-> %s:%u\n",
+                a, (unsigned)s.key.sport, b, (unsigned)s.key.dport);
+    std::printf("Total Packets: %llu\n",
+                (unsigned long long)total_pkts);
+    std::printf("Data Transferred: %s\n",
+                human_bytes(total_bytes).c_str());
+    if (avg_rtt_ms >= 0.0)
+        std::printf("Avg RTT: %.2f ms\n", avg_rtt_ms);
+    else
+        std::printf("Avg RTT: N/A\n");
+    std::printf("Avg Throughput: %.1f B/s\n", avg_bps);
+    std::printf("Retransmissions: %llu\n",
+                (unsigned long long)retrans);
+    std::printf("===========================\n");
+}
+
+// 한 번만 출력하도록 보장
+static inline void emit_session_report_once(Session& s, const char* reason){
+    if (s.report_printed) return;
+    print_session_summary(s, reason);
+    s.report_printed = true;
 }
 
 std::vector<SessionSummary> SessionTable::snapshot_top(size_t N, uint64_t now_ns) const{
@@ -322,7 +307,13 @@ void SessionTable::update_from_packet(const PacketRecord& pr)
         std::printf("[EVT] tcp_state_change: %s -> %s\n",
             tcp_state_name(prev_state), tcp_state_name(sess.state));
         dump_session_line(sess);
-    }
+    
+            // ★ FIN/RST로 종료 상태면 즉시 요약 리포트(중복 방지)
+        if ((sess.state == TcpState::FIN || sess.state == TcpState::RST) &&
+            !sess.report_printed) {
+            emit_session_report_once(sess,"state change to FIN/RST");
+        }
+    }  
 }
 
 // display top 10
@@ -345,7 +336,7 @@ void SessionTable::dump_top(size_t N) const {
     std::puts("\n[session] top sessions:");
     for (size_t i=0;i<snap.size();++i) {
         const Session& s = snap[i].first;
-        print_session(s,i+1,snap[i].second,true);
+        print_session_summary(s, "snapshot");
     }
 }
 
@@ -424,24 +415,20 @@ size_t SessionTable::prune(uint64_t now_ns)
                 // FIN/RST 관찰: 마지막 활동 후 그레이스 지나면 제거
                 if (idle_ns >= timeouts.closed_grace_ns) {
                     std::puts("[PRUNE] FIN/RST grace timeout → removing:");
-                    uint64_t total_bytes = s.dir[0].bytes + s.dir[1].bytes;
-                    print_session(s, /*ordinal=*/0, total_bytes, /*detailed=*/true);  // ★ 상세 로그
+                    emit_session_report_once(s, "FIN/RST grace timeout");
                     it = map.erase(it); ++removed; continue;
                 }
             } else {
                 if (idle_ns >= tcp_idle_to(s, timeouts)) {
                     std::puts("[PRUNE] TCP idle timeout → removing:");
-                    uint64_t total_bytes = s.dir[0].bytes + s.dir[1].bytes;
-                    print_session(s, /*ordinal=*/0, total_bytes, /*detailed=*/true);  // ★ 상세 로그
+                    emit_session_report_once(s, "TCP idle timeout");
                     it = map.erase(it); ++removed; continue;
                 }
             }
         } else {
             // UDP/기타: 단순 idle 타임아웃
             if (idle_ns >= timeouts.udp_ns) {
-                std::puts("[PRUNE] UDP idle timeout → removing:");
-                uint64_t total_bytes = s.dir[0].bytes + s.dir[1].bytes;
-                print_session(s, /*ordinal=*/0, total_bytes, /*detailed=*/true);      // ★ 상세 로그
+                emit_session_report_once(s, "UDP idle timeout");
                 it = map.erase(it); ++removed; continue;
             }
         }

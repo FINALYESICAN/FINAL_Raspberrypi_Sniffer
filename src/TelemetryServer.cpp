@@ -213,7 +213,6 @@ void TelemetryServer::send_summary_once(){
     json j;
     j["type"] = "SUMMARY";
     j["ts_ns"] = now_ns;
-    //j["session"] = json::array();
     auto& arr = j["sessions"];
     arr = json::array();
 
@@ -228,16 +227,14 @@ void TelemetryServer::send_summary_once(){
 
         json js;
         // 키/주소
-        json key = {
-            {"sip",      s.key.sip},
-            {"dip",      s.key.dip},
-            {"sport",    s.key.sport},
-            {"dport",    s.key.dport},
-            {"proto",    s.key.proto},
-            {"sip_str",  ip_to_str(s.key.sip)},
-            {"dip_str",  ip_to_str(s.key.dip)}
+        json fk = {
+            {"proto",    (int)s.key.proto},
+            {"src_ip",   ip_to_str(s.key.sip)},
+            {"src_port", (int)s.key.sport},
+            {"dst_ip",   ip_to_str(s.key.dip)},
+            {"dst_port", (int)s.key.dport}
         };
-        js["key"] = key;
+        js["flow_key"] = fk;
 
         // 상태/역할/바이트/패킷
         json state = SessionTable::tcp_state_name(s.state);
