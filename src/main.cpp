@@ -10,6 +10,7 @@
 #include "packet_record.h"
 //for mirroring snort
 #include "mirror_rx.h"
+#include "alert_rx.h"
 #include <thread>
 #include <chrono>
 //telemetric
@@ -58,13 +59,34 @@ int main(int argc, char** argv){
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     });
+    std::thread alert_worker;
 
     uint64_t last_prune_ns = 0;
 
     if(use_mirror){
         MirrorReceiver rx;
         if(!rx.open_path()) return 2;
+
+        AlertReceiver alerts;
+        if(!alerts.open_path()) return 2;
+
         std::puts("Start receiving from DAQ mirror socket...");
+        std::puts("Start receiving: /tmp/daq_mirror.sock (packets), /tmp/snort_alert (alerts)");
+        
+         // 알림 수신 스레드
+        alert_worker = std::thread([&](){
+            alerts.loop([&](const AlertRecord& a){
+                // 1) 로그로 확인
+                std::fprintf(stderr, "[ALERT] %s  ts=%u.%06u cap=%u wire=%u\n",
+                            a.msg.c_str(), a.ts_sec, a.ts_usec, a.caplen, a.pktlen);
+
+                // 2) Qt/Telemetry에 바로 페이로드 올리기 (예시)
+                // tel.push_alert(a.ts_sec, a.ts_usec, a.msg, a.pkt, a.pkt_size, a.data_off, a.net_off, a.trans_off);
+                // ↑ 네가 쓰는 Qt/Telemetry API에 맞춰 인자만 매핑.
+            }, [&]{ return g_stop!=0; });
+            // detach 또는 join을 프로그램 종료 시점에
+        });
+        // 메인 루프
         rx.loop([&](const MirrorHdr& mh, const uint8_t* bytes){
             pcap_pkthdr h{};
             h.ts     = mh.ts;
@@ -144,7 +166,8 @@ int main(int argc, char** argv){
         pkts.dump_tail(5);
         sess.dump_top(10);           // 바이트 상위 세션/RTT 출력(기존 API) :contentReference[oaicite:5]{index=5}
     }
-    tel.stop();
     if (prune_worker.joinable()) prune_worker.join();
+    if (alert_worker.joinable()) alert_worker.join();
+    tel.stop();
     return 0;
 }
