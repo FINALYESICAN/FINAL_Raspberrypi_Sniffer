@@ -66,7 +66,7 @@ int main(int argc, char** argv){
     if(use_mirror){
         MirrorReceiver rx;
         if(!rx.open_path()) return 2;
-
+        
         AlertReceiver alerts;
         if(!alerts.open_path()) return 2;
 
