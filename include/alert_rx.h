@@ -14,6 +14,7 @@
 #include <errno.h>
 
 // snort 2.9.20 unisock 포멧 파서
+// 구조체 바이트 배열을 완전히 동일하게 맞추기 위한 설정값이다. -> 패딩을 제거한다.
 #pragma pack(push, 1)
 struct tv32 { uint32_t tv_sec; uint32_t tv_usec; };
 struct pcap_pkthdr32 { tv32 ts; uint32_t caplen; uint32_t len; };
@@ -28,6 +29,7 @@ struct AlertUnixSockHead {
     uint32_t      val;                // 플래그
     // 이어서 pkt[caplen] 가 오며, 그 뒤로 Event가 붙을 수 있음(여기선 사용 안 함)
 };
+//패딩값 돌려놓기.
 #pragma pack(pop)
 
 struct AlertRecord {

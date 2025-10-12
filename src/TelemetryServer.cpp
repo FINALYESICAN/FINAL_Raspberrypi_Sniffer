@@ -287,6 +287,7 @@ void TelemetryServer::send_summary_once(){
     send_with_prefix(j.dump());
 }
 
+//패킷 데이터 송신
 void TelemetryServer::push_packet(const PacketRecord& pr){
     json j;
     j["type"] = "PACKET";
@@ -322,6 +323,89 @@ void TelemetryServer::push_packet(const PacketRecord& pr){
     std::lock_guard<std::mutex> lk(q_mtx_);
     if(outq_.size()>=outq_limit_) outq_.pop_front();
     outq_.push_back(j.dump());
+}
+// // alert 데이터 송신
+// void TelemetryServer::push_alert(uint32_t ts_sec, uint32_t ts_usec,
+//                                  const std::string& msg,
+//                                  const uint8_t* pkt, size_t pkt_size,
+//                                  uint32_t data_off, uint32_t net_off, uint32_t trans_off)
+// {
+//     nlohmann::json j;
+//     j["type"]     = "ALERT";
+//     j["ts_sec"]   = (long long)ts_sec;
+//     j["ts_usec"]  = (long long)ts_usec;
+//     j["msg"]      = msg;
+//     j["caplen"]   = (int)pkt_size;
+
+//     // 오프셋(존재 여부는 프론트에서 범위 체크)
+//     j["offsets"] = {
+//         {"l2",   (int)0},                    // L2는 보통 0
+//         {"l3",   (int)net_off},
+//         {"l4",   (int)trans_off},
+//         {"data", (int)data_off}
+//     };
+
+//     // payload는 과도해지지 않게 앞부분만 (필요시 조절)
+//     const size_t MAX_TX = 512;
+//     size_t n = std::min(pkt_size, MAX_TX);
+//     if (pkt && n > 0) {
+//         j["payload_b64"] = b64encode(pkt, n);   // 기존 유틸 재사용
+//         j["payload_head_len"] = (int)n;
+//     } else {
+//         j["payload_b64"] = "";
+//         j["payload_head_len"] = 0;
+//     }
+
+//     std::lock_guard<std::mutex> lk(q_mtx_);
+//     if (outq_.size() >= outq_limit_) outq_.pop_front();
+//     outq_.push_back(j.dump());
+// }
+
+void TelemetryServer::push_alert(const AlertView& view,
+                                 const uint8_t* payload, size_t payload_len)
+{
+    nlohmann::json j;
+    j["type"]    = "ALERT";
+
+    // 시간
+    j["ts_sec"]  = static_cast<long long>(view.ts_sec);
+    j["ts_usec"] = static_cast<long long>(view.ts_usec);
+
+    // 정책이름 (= rule msg)
+    j["policy"]  = view.policy;
+
+    // 동작 (unsock은 alert 고정)
+    j["action"]  = view.action;  // "ALERT"
+
+    // 출발지/도착지
+    j["src"] = {
+        {"ip",   view.src_ip},
+        {"port", static_cast<int>(view.src_port)}
+    };
+    j["dst"] = {
+        {"ip",   view.dst_ip},
+        {"port", static_cast<int>(view.dst_port)}
+    };
+
+    // 페이로드 (과도한 전송 방지 위해 헤드 제한 — 필요하면 조절)
+    const size_t MAX_TX = 1024;  // 1KB 정도 (원하면 더 키워도 됨)
+    size_t n = (payload && payload_len) ? std::min(payload_len, MAX_TX) : 0;
+    if (n > 0) {
+        j["payload_b64"] = b64encode(payload, n);
+        j["payload_len"] = static_cast<int>(payload_len); // 원래 총 길이도 함께 제공
+        j["payload_head_len"] = static_cast<int>(n);
+    } else {
+        j["payload_b64"] = "";
+        j["payload_len"] = 0;
+        j["payload_head_len"] = 0;
+    }
+
+    // 큐에 적재 → 기존 송신 쓰레드가 길이 프리픽스 붙여 전송
+    {
+        std::lock_guard<std::mutex> lk(q_mtx_);
+        if (outq_.size() >= outq_limit_) outq_.pop_front();
+        outq_.push_back(j.dump());
+    }
 }
 
 bool TelemetryServer::recv_all(void* buf, size_t len){

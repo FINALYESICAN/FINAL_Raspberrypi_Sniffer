@@ -5,6 +5,7 @@
 #include <string>
 #include "session_table.h"
 #include "packet_list.h"
+#include "alert_parse.h"
 
 #include <deque>
 #include <mutex>
@@ -17,6 +18,14 @@ public:
     void set_period_ms(int ms);
 
     void push_packet(const PacketRecord& pr);
+    
+    // Snort ALERT 전송용
+    // void push_alert(uint32_t ts_sec, uint32_t ts_usec,
+    //                 const std::string& msg,
+    //                 const uint8_t* pkt, size_t pkt_size,
+    //                 uint32_t data_off, uint32_t net_off, uint32_t trans_off);
+    void push_alert(const AlertView& view,
+                    const uint8_t* payload, size_t payload_len);
 
 private:
     SessionTable* sess_{nullptr};
