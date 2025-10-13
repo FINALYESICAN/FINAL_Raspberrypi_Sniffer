@@ -18,6 +18,7 @@
 //telemetric
 #include "TelemetryServer.h"
 
+// ctrl c 누르면 종료
 static volatile sig_atomic_t g_stop = 0;
 static Capture* g_cap = nullptr;
 static void on_sigint(int){ 
@@ -34,7 +35,7 @@ int main(int argc, char** argv){
     std::signal(SIGINT, on_sigint);
 
     if (argc == 1){
-        std::puts("Usage: sudo ./sniff <iface|mirror> [bpf] [nano]");
+        std::puts("Usage: sudo ./pcap_inspect <interface|mirror> [bpf] [nano]");
         Capture::list_interfaces();
         return 0;
     }
@@ -45,6 +46,7 @@ int main(int argc, char** argv){
     Decoder      dec;            // L2/L3/L4 디코더
     AlertStore   alert_store;    // 얼러트 저장
 
+    // 세션 테이블, 패킷 보관 테이블 포인터 가지고 있다.
     TelemetryServer tel;
     tel.start(&sess, &pkts, 55555, 1000);
 
@@ -62,10 +64,12 @@ int main(int argc, char** argv){
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     });
+    // 경고 스레드
     std::thread alert_worker;
 
     uint64_t last_prune_ns = 0;
 
+    // snort daq로부터 받은 데이터 처리
     if(use_mirror){
         MirrorReceiver rx;
         if(!rx.open_path()) return 2;
@@ -76,10 +80,10 @@ int main(int argc, char** argv){
         std::puts("Start receiving from DAQ mirror socket...");
         std::puts("Start receiving: /tmp/daq_mirror.sock (packets), /tmp/snort_alert (alerts)");
         
-         // 알림 수신 스레드
+         // 경고 수신 스레드
         alert_worker = std::thread([&](){
             alerts.loop([&](const AlertRecord& a){
-                // 1) 로그로 확인
+                // 1) 로그로 경고 확인 - 나중에 지울계획
                 std::fprintf(stderr, "[ALERT] %s  ts=%u.%06u cap=%u wire=%u\n",
                             a.msg.c_str(), a.ts_sec, a.ts_usec, a.caplen, a.pktlen);
                 // 2) alertView 파싱
@@ -88,6 +92,7 @@ int main(int argc, char** argv){
 
                 const uint8_t* payload = nullptr;
                 size_t payload_len = 0;
+                // alert에서 페이로드 계산
                 if (a.pkt && a.data_off < a.pkt_size) {
                     payload = a.pkt + a.data_off;
                     payload_len = a.pkt_size - a.data_off;
@@ -115,7 +120,7 @@ int main(int argc, char** argv){
         // 메인 루프
         rx.loop([&](const MirrorHdr& mh, const uint8_t* bytes){
             pcap_pkthdr h{};
-            h.ts     = mh.ts;
+            h.ts     = mh.ts; 
             h.caplen = mh.caplen;
             h.len    = mh.pktlen;
             
@@ -125,7 +130,7 @@ int main(int argc, char** argv){
             rec.caplen = mh.caplen;
             rec.wirelen = mh.pktlen;
             rec.dlt = mh.linktype;
-            // Decoder::parse_l2_l3_l4 직접 호출
+            // Decoder::parse_l2_l3_l4 직접 호출 -> rec 만들어옴
             dec.decode_dlt(mh.linktype, h, bytes, rec);
             sess.update_from_packet(rec);
             uint64_t id = pkts.reserved_id();

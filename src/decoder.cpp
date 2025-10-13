@@ -46,10 +46,11 @@ void Decoder::decode(pcap_t& pcap, const pcap_pkthdr& h, const u_char* bytes, Pa
 void Decoder::decode_dlt(int dlt, const pcap_pkthdr& h, const u_char* bytes, PacketRecord& rec){
     if (!bytes) return;
     if (h.caplen == 0) return;
-    // rec.ts_ns  = tv_to_ns(h.ts,is_nano);
-    // rec.caplen = h.caplen;
-    // rec.wirelen= h.len;
-    // rec.dlt    = dlt;
+
+    rec.dlt    = dlt;
+    rec.caplen = h.caplen;
+    rec.wirelen= h.len;
+
     rec.l2_off = 0U;
     parse_l2_l3_l4(rec.dlt, bytes, h.caplen, rec);
 
@@ -121,7 +122,8 @@ void Decoder::parse_ipv4(const uint8_t* p, uint32_t len, PacketRecord& rec, cons
 
     const uint8_t* l4 = p + ip_hl;
     uint32_t l4len = len - ip_hl;
-
+    
+    // tcp 분기일때
     if (iph->ip_p == IPPROTO_TCP && l4len >= sizeof(tcphdr)){
         const tcphdr* th = reinterpret_cast<const tcphdr*>(l4);
         uint32_t thl = (uint32_t)th->doff * 4U;
@@ -135,8 +137,8 @@ void Decoder::parse_ipv4(const uint8_t* p, uint32_t len, PacketRecord& rec, cons
 
         //추가됨 for timestamp
         rec.tcp_ts_present = false;
-        rec.tcp_ts_val = 0;
-        rec.tcp_ts_ecr = 0;
+        rec.tcp_ts_val = 0; // 송신자가 보낸 타임스탬프값
+        rec.tcp_ts_ecr = 0; // 수신자가 받은 이전 타임스탬프값의 에코
         if (thl >= sizeof(tcphdr) + 1 && l4len >= thl) {
             const uint8_t* opt = reinterpret_cast<const uint8_t*>(th) + sizeof(tcphdr);
             size_t opt_len = thl - sizeof(tcphdr);
@@ -168,7 +170,7 @@ void Decoder::parse_ipv4(const uint8_t* p, uint32_t len, PacketRecord& rec, cons
                 }
             }
         }
-    } else if (iph->ip_p == IPPROTO_UDP && l4len >= sizeof(udphdr)){
+    } else if (iph->ip_p == IPPROTO_UDP && l4len >= sizeof(udphdr)){//udp는 그냥 포트번호만 기록
         const udphdr* uh = reinterpret_cast<const udphdr*>(l4);
         rec.sport      = ntohs(uh->source);
         rec.dport      = ntohs(uh->dest);

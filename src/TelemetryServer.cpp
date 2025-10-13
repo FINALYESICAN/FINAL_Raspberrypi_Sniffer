@@ -324,43 +324,8 @@ void TelemetryServer::push_packet(const PacketRecord& pr){
     if(outq_.size()>=outq_limit_) outq_.pop_front();
     outq_.push_back(j.dump());
 }
-// // alert 데이터 송신
-// void TelemetryServer::push_alert(uint32_t ts_sec, uint32_t ts_usec,
-//                                  const std::string& msg,
-//                                  const uint8_t* pkt, size_t pkt_size,
-//                                  uint32_t data_off, uint32_t net_off, uint32_t trans_off)
-// {
-//     nlohmann::json j;
-//     j["type"]     = "ALERT";
-//     j["ts_sec"]   = (long long)ts_sec;
-//     j["ts_usec"]  = (long long)ts_usec;
-//     j["msg"]      = msg;
-//     j["caplen"]   = (int)pkt_size;
 
-//     // 오프셋(존재 여부는 프론트에서 범위 체크)
-//     j["offsets"] = {
-//         {"l2",   (int)0},                    // L2는 보통 0
-//         {"l3",   (int)net_off},
-//         {"l4",   (int)trans_off},
-//         {"data", (int)data_off}
-//     };
-
-//     // payload는 과도해지지 않게 앞부분만 (필요시 조절)
-//     const size_t MAX_TX = 512;
-//     size_t n = std::min(pkt_size, MAX_TX);
-//     if (pkt && n > 0) {
-//         j["payload_b64"] = b64encode(pkt, n);   // 기존 유틸 재사용
-//         j["payload_head_len"] = (int)n;
-//     } else {
-//         j["payload_b64"] = "";
-//         j["payload_head_len"] = 0;
-//     }
-
-//     std::lock_guard<std::mutex> lk(q_mtx_);
-//     if (outq_.size() >= outq_limit_) outq_.pop_front();
-//     outq_.push_back(j.dump());
-// }
-
+// 경고 타입, 시간, 정책명, 동작(alert고정이긴함), 출발지/도착지, 페이로드 크기
 void TelemetryServer::push_alert(const AlertView& view,
                                  const uint8_t* payload, size_t payload_len)
 {
@@ -388,7 +353,7 @@ void TelemetryServer::push_alert(const AlertView& view,
     };
 
     // 페이로드 (과도한 전송 방지 위해 헤드 제한 — 필요하면 조절)
-    const size_t MAX_TX = 1024;  // 1KB 정도 (원하면 더 키워도 됨)
+    const size_t MAX_TX = 2048;  // 1KB 정도 (원하면 더 키워도 됨)
     size_t n = (payload && payload_len) ? std::min(payload_len, MAX_TX) : 0;
     if (n > 0) {
         j["payload_b64"] = b64encode(payload, n);
@@ -426,6 +391,7 @@ bool TelemetryServer::recv_all(void* buf, size_t len){
     }
     return true;
 }
+
 bool TelemetryServer::recv_one_json(nlohmann::json& out){
     uint32_t nlen_be = 0;
     if (!recv_all(&nlen_be, 4)) return false;

@@ -251,7 +251,7 @@ SessionTable::KeyDir SessionTable::canonical_from_packet(const PacketRecord& pr)
     return kd;
 }
 void SessionTable::update_from_packet(const PacketRecord& pr) 
-{
+{   //tcp = proto 6
     if (!(pr.ip_version==4) || (pr.l4_proto!=6 && pr.l4_proto!=17)) return; // TCP/UDP만
     //key direction결정
     auto kd = canonical_from_packet(pr);
@@ -446,7 +446,8 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
     const bool FIN = f & 0x01;
     const bool RST = f & 0x04;
 
-    // 상태전이(아주 단순화)
+    // 상태전이
+    // Syn부터 시작하지 않으면 mid_established로 간주한다.
     if (s.state == TcpState::NONE && !SYN) {
         s.state = TcpState::MID_ESTABLISHED;
         s.midstream = true;
@@ -484,6 +485,7 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
     me.last_seq = pr.tcp_seq;
     me.last_ack = pr.tcp_ack;
 
+    // timestamp기반으로 RTT 계산
     if (pr.tcp_ts_present) {
         // 내가 '이 방향'에서 보낸 TSval 기록 (항상)
         me.ts_recent_val = pr.tcp_ts_val;
