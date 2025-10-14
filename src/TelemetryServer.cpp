@@ -310,7 +310,7 @@ void TelemetryServer::push_packet(const PacketRecord& pr){
     if (pr.l4_proto==6) {
         j["l4"] = { {"sport",(int)pr.sport}, {"dport",(int)pr.dport},
                     {"flags", tcp_flags_str(pr.tcp_flags)} };
-    } else {
+    } else if(pr.l4_proto==1) {
         j["l4"] = { {"sport",(int)pr.sport}, {"dport",(int)pr.dport} };
     }
 

@@ -295,25 +295,27 @@ void SessionTable::update_from_packet(const PacketRecord& pr)
     }
 
     // ====== 여기서 '변경 이벤트'를 찍는다 ======
+    bool need_dump = false;
     if (created_now) {
         std::puts("[EVT] session_created");
-        dump_session_line(sess);
+        need_dump = true;
     }
     if (direction_became_known) {
         std::puts("[EVT] direction_decided");
-        dump_session_line(sess);
+        need_dump = true;
     }
     if (sess.state != prev_state) {
         std::printf("[EVT] tcp_state_change: %s -> %s\n",
             tcp_state_name(prev_state), tcp_state_name(sess.state));
-        dump_session_line(sess);
+        need_dump = true;
     
             // ★ FIN/RST로 종료 상태면 즉시 요약 리포트(중복 방지)
         if ((sess.state == TcpState::FIN || sess.state == TcpState::RST) &&
             !sess.report_printed) {
             emit_session_report_once(sess,"state change to FIN/RST");
         }
-    }  
+    }
+    if(need_dump) dump_session_line(sess);
 }
 
 // display top 10

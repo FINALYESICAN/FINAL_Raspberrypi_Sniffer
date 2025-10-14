@@ -175,8 +175,8 @@ void Decoder::parse_ipv4(const uint8_t* p, uint32_t len, PacketRecord& rec, cons
         rec.sport      = ntohs(uh->source);
         rec.dport      = ntohs(uh->dest);
         rec.l4_hdr_len = sizeof(udphdr);
-    } else if (iph->ip_p == IPPROTO_ICMP && l4len >= 2){
-        rec.l4_hdr_len = 0;
+    } else if (iph->ip_p == IPPROTO_ICMP && l4len >= 8){
+        rec.l4_hdr_len = 8;
     }
 }
 
