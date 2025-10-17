@@ -287,6 +287,59 @@ void TelemetryServer::send_summary_once(){
     send_with_prefix(j.dump());
 }
 
+void TelemetryServer::push_session_report(const Session& s, const char* reason)
+{
+    if (client_fd_ < 0) return; // 연결 없으면 큐잉해도 되고, 여기선 즉시 송신 방식이면 가드
+
+    // 총합
+    uint64_t total_pkts  = s.dir[0].pkts + s.dir[1].pkts;
+    uint64_t total_bytes = s.dir[0].bytes + s.dir[1].bytes;
+
+    // 기간/평균 처리율
+    double dur_sec = (s.last_ts_ns > s.first_ts_ns)
+                     ? (double)(s.last_ts_ns - s.first_ts_ns) / 1e9 : 0.0;
+    double avg_bps = (dur_sec > 0.0) ? (total_bytes / dur_sec) : 0.0;
+
+    // RTT 대표값 (print와 동일 로직)
+    double avg_rtt_ms = (s.rtt_ack_ms > 0) ? s.rtt_ack_ms
+                       : (s.rtt_syn_ms > 0) ? s.rtt_syn_ms : -1.0;
+
+    uint64_t retrans = s.dir[0].retrans_pkts + s.dir[1].retrans_pkts;
+
+    nlohmann::json j;
+    j["type"]   = "REPORT";     // ★ UI에서 구분
+    j["reason"] = reason ? reason : "";
+    j["time"]   = (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // 5-튜플
+    j["flow_key"] = {
+        {"proto", (int)s.key.proto},
+        {"src_ip", ip_to_str(s.key.sip)},
+        {"src_port", (int)s.key.sport},
+        {"dst_ip", ip_to_str(s.key.dip)},
+        {"dst_port", (int)s.key.dport}
+    };
+
+    // 요약 수치
+    j["summary"] = {
+        {"state", SessionTable::tcp_state_name(s.state)},
+        {"total_pkts", (long long)total_pkts},
+        {"total_bytes",(long long)total_bytes},
+        {"duration_sec", dur_sec},
+        {"avg_bps", avg_bps},
+        {"avg_rtt_ms", avg_rtt_ms},
+        {"retrans_pkts", (long long)retrans}
+    };
+    
+    // 큐에 적재해서 기존 송신 루프가 prefix로 전송 (PACKET과 동일 경로)
+    {
+        std::lock_guard<std::mutex> lk(q_mtx_);
+        if (outq_.size() >= outq_limit_) outq_.pop_front();
+        outq_.push_back(j.dump());
+    }
+}
+
 //패킷 데이터 송신
 void TelemetryServer::push_packet(const PacketRecord& pr){
     json j;

@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <sstream>
 #include <arpa/inet.h>
+#include <chrono>
 
 // 상태별 권장 idle 타임아웃
 static inline uint64_t tcp_idle_to(const Session& s, const SessionTimeouts& t)
@@ -72,6 +73,87 @@ static int map_logical_dir_to_AB(const Session&  s, const PacketRecord& pr, int 
     // A/B 인덱스로 변환: A가 client이면 logical 그대로, B가 client면 뒤집기
     return s.client_is_A ? logical : (logical ^ 1);
 }
+
+// Retrans 개선용 헬퍼들
+using Range = DirStats::Range;
+static bool overlaps(uint32_t s, uint32_t e, const Range& r) {
+    return !(e <= r.start || s >= r.end);
+}
+static bool fully_contained(uint32_t s, uint32_t e, const std::vector<Range>& seen) {
+    for (const auto& r : seen) {
+        if (s >= r.start && e <= r.end) return true;
+    }
+    return false;
+}
+static uint64_t first_seen_ts_of(uint32_t s, uint32_t e, const std::vector<Range>& seen) {
+    for (const auto& r : seen) {
+        if (s >= r.start && e <= r.end) return r.first_ts_ns;
+    }
+    return 0;
+}
+static void insert_merge(std::vector<Range>& seen, uint32_t s, uint32_t e, uint64_t ts) {
+    Range nr{ s, e, ts };
+    std::vector<Range> out;
+    for (auto& r : seen) {
+        if (overlaps(nr.start, nr.end, r) || nr.end == r.start || nr.start == r.end) {
+            nr.start = std::min(nr.start, r.start);
+            nr.end   = std::max(nr.end,   r.end);
+            nr.first_ts_ns = std::min(nr.first_ts_ns, r.first_ts_ns);
+        } else {
+            out.push_back(r);
+        }
+    }
+    out.push_back(nr);
+    seen.swap(out);
+}
+
+static bool is_control_or_probe(bool has_payload,
+                                bool syn, bool fin, bool rst,
+                                uint32_t payload_len,
+                                uint32_t seq, uint32_t ack)
+{
+    // 제어 플래그는 재전송 카운트에서 제외(또는 별도 카운트)
+    if (syn || fin || rst) return true;
+    // keep-alive: payload 0~1, seq == ack-1 패턴
+    if (payload_len <= 1 && ack != 0 && seq + 1 == ack) return true;
+    // pure ACK
+    if (!has_payload) return true;
+    return false;
+}
+static void handle_payload_segment(Session& s, DirStats& d,
+                                   uint32_t rseq, uint32_t len,
+                                   uint64_t now_ns)
+{
+    const uint32_t seg_s = rseq;
+    const uint32_t seg_e = rseq + len;
+
+    // 초기 그레이스: 세션 시작 직후 판정 보류 (2×RTT 또는 3s)
+    const uint64_t rtt_ns = (s.rtt_ack_ms > 0) ? (uint64_t)(s.rtt_ack_ms * 1e6)
+                         : (s.rtt_syn_ms > 0) ? (uint64_t)(s.rtt_syn_ms * 1e6)
+                                              : 10ULL * 1000 * 1000; // 10ms
+    const uint64_t grace  = std::max<uint64_t>(2 * rtt_ns, 3ULL * 1000 * 1000 * 1000);
+    if (now_ns - s.first_ts_ns < grace) {
+        insert_merge(d.seen, seg_s, seg_e, now_ns);
+        return;
+    }
+
+    // 완전 포함이면 재전송 후보
+    if (fully_contained(seg_s, seg_e, d.seen)) {
+        const uint64_t first_seen = first_seen_ts_of(seg_s, seg_e, d.seen);
+        const uint64_t W = std::max<uint64_t>(2 * rtt_ns, 10ULL * 1000 * 1000); // 재정렬 유예(>=10ms)
+        if (first_seen && now_ns - first_seen > W) {
+            d.retrans_pkts++;           // ★ 진짜 재전송으로 카운트
+        } else {
+            d.ooo_pkts++;               // ★ 재정렬(OOO)로 처리
+        }
+        return;
+    }
+    // 부분 겹침/새 데이터 → seen에 병합 (중복 카운트 방지)
+    insert_merge(d.seen, seg_s, seg_e, now_ns);
+    // highest_seq_end 유지
+    if (seg_e > d.highest_seq_end) d.highest_seq_end = seg_e;
+}
+
 
 // for throughput 정상화
 // 표시 전용 throughput 미리보기(상태는 바꾸지 않음)
@@ -177,10 +259,11 @@ static void print_session_summary(const Session& s, const char* reason = nullptr
 }
 
 // 한 번만 출력하도록 보장
-static inline void emit_session_report_once(Session& s, const char* reason){
+void SessionTable::emit_session_report_once(Session& s, const char* reason){
     if (s.report_printed) return;
     print_session_summary(s, reason);
     s.report_printed = true;
+    if(report_cb) report_cb(s,reason);
 }
 
 std::vector<SessionSummary> SessionTable::snapshot_top(size_t N, uint64_t now_ns) const{
@@ -524,20 +607,30 @@ void SessionTable::update_tcp(Session& s, int dir, const PacketRecord& pr){
         me.have_last_data = true;
         me.last_data_ts_ns = pr.ts_ns;
         // --- 재전송/OOO 감지 ---
-        // 1) rseq_end <= highest_seq_end : 완전 과거 범위 → 재전송으로 카운트
-        // 2) rseq < highest_seq_end      : 일부 겹침 → 재전송으로 카운트
-        if (rseq_end <= me.highest_seq_end) {
-            me.retrans_pkts++;
-        } else if (rseq < me.highest_seq_end) {
-            me.retrans_pkts++;
-            // 새 데이터의 우측 끝으로 확장
-            me.highest_seq_end = std::max(me.highest_seq_end, rseq_end);
-        } else {
-            // 순방향 최신 데이터. 다만 큰 점프는 OOO로 참고 표기
-            if (rseq > me.highest_seq_end && me.highest_seq_end!=0) {
-                me.ooo_pkts++;
-            }
-            me.highest_seq_end = std::max(me.highest_seq_end, rseq_end);
+        // // 1) rseq_end <= highest_seq_end : 완전 과거 범위 → 재전송으로 카운트
+        // // 2) rseq < highest_seq_end      : 일부 겹침 → 재전송으로 카운트
+        // if (rseq_end <= me.highest_seq_end) {
+        //     me.retrans_pkts++;
+        // } else if (rseq < me.highest_seq_end) {
+        //     me.retrans_pkts++;
+        //     // 새 데이터의 우측 끝으로 확장
+        //     me.highest_seq_end = std::max(me.highest_seq_end, rseq_end);
+        // } else {
+        //     // 순방향 최신 데이터. 다만 큰 점프는 OOO로 참고 표기
+        //     if (rseq > me.highest_seq_end && me.highest_seq_end!=0) {
+        //         me.ooo_pkts++;
+        //     }
+        //     me.highest_seq_end = std::max(me.highest_seq_end, rseq_end);
+        // }
+
+        const bool syn = (pr.tcp_flags & 0x02);
+        const bool fin = (pr.tcp_flags & 0x01);
+        const bool rst = (pr.tcp_flags & 0x04);
+        const bool has_payload = true; // 위 if 조건으로 보장
+        // zero-window probe는 tcp_win이 없어 검출 불가 — keep-alive만 예외 처리
+        if (!is_control_or_probe(has_payload, syn, fin, rst,
+                                 pr.payload_len, pr.tcp_seq, pr.tcp_ack)) {
+            handle_payload_segment(s, me, rseq, pr.payload_len, pr.ts_ns);
         }
     }
 

@@ -50,8 +50,12 @@ int main(int argc, char** argv){
     TelemetryServer tel;
     tel.start(&sess, &pkts, 55555, 1000);
 
+    sess.set_report_callback([&](const Session& s, const char* reason){
+        tel.push_session_report(s, reason);
+    });
+
     // === 별도 프루닝 스레드: 1초마다 sess.prune() ===
-    std::thread prune_worker([&]{
+    std::thread prune_worker([&]{ 
         using namespace std::chrono;
         while (!g_stop) {
             // rec.ts_ns가 epoch ns이므로 REALTIME epoch 사용

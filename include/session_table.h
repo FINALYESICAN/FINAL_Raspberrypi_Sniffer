@@ -10,7 +10,9 @@
 #include <array>
 #include <vector>
 #include <mutex>
+#include <functional>
 
+// ns to sec
 static inline double ns_to_sec(uint64_t ns){return ns/1e9;}
 
 struct FiveTuple {
@@ -65,6 +67,13 @@ struct DirStats {
 
     // --- 재전송/순서 관련 ---
     uint32_t highest_seq_end{0}; // 지금까지 본 데이터 구간의 최댓값(우측 끝)
+    struct Range{
+        uint32_t start;
+        uint32_t end;
+        uint64_t first_ts_ns;
+    };
+    std::vector<Range> seen;
+
     uint64_t retrans_pkts{0};    // 재전송으로 판단된 패킷 수
     uint64_t ooo_pkts{0};        // out-of-order 판단 수(참고 통계)
 
@@ -171,6 +180,15 @@ public:
     size_t prune(uint64_t now_ns); // 만료/종료 세션 제거
 
     size_t size() const { std::lock_guard<std::mutex> lk(mtx); return map.size(); }
+
+    // callback 보관
+    std::function<void(const Session&, const char* reason)> report_cb;
+
+    void set_report_callback(std::function<void(const Session&, const char*)> cb) {
+        report_cb = std::move(cb);
+    }
+
+    void emit_session_report_once(Session& s, const char* reason);
 private:
     // mutex
     mutable std::mutex mtx;

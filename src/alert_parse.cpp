@@ -11,9 +11,10 @@ static inline uint32_t rd32_be(const uint8_t* p) {
     return (uint32_t(p[0])<<24)|(uint32_t(p[1])<<16)|(uint32_t(p[2])<<8)|uint32_t(p[3]);
 }
 
-static std::string ip4_to_str(uint32_t be_ip) {
+static std::string ip4_to_str(const uint8_t* p4) {
     char buf[INET_ADDRSTRLEN]{};
-    in_addr a; a.s_addr = be_ip; // already big-endian
+    in_addr a; 
+    std::memcpy(&a.s_addr, p4, 4);
     return inet_ntop(AF_INET, &a, buf, sizeof(buf)) ? std::string(buf) : std::string();
 }
 static std::string ip6_to_str(const uint8_t* p16) {
@@ -49,8 +50,8 @@ bool build_alert_view(const AlertRecord& a, AlertView& out) {
         if (ihl < 20 || cap < l3_off + ihl) return false;
 
         const uint8_t proto = ip[9];
-        out.src_ip = ip4_to_str(rd32_be(ip + 12));
-        out.dst_ip = ip4_to_str(rd32_be(ip + 16));
+        out.src_ip = ip4_to_str(ip + 12);
+        out.dst_ip = ip4_to_str(ip + 16);
 
         // L4 위치: Snort trans_off 우선, 없으면 IHL 뒤
         size_t l4_off = (a.trans_off && a.trans_off < cap) ? a.trans_off : (l3_off + ihl);

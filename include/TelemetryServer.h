@@ -26,6 +26,8 @@ public:
     //                 uint32_t data_off, uint32_t net_off, uint32_t trans_off);
     void push_alert(const AlertView& view,
                     const uint8_t* payload, size_t payload_len);
+    
+    void push_session_report(const Session& s, const char* reason);
 
 private:
     SessionTable* sess_{nullptr};
